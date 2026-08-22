@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_BULK_CLINICAL_PROCEDURE__";
   const PANEL_ID = "fonet-toplu-klinik-islem-guvenli";
-  const VERSION = "1.0.1";
+  const VERSION = "1.0.2";
   const HISTORY_FRESH_MS = 60 * 1000;
   const HOUR_MS = 60 * 60 * 1000;
   const PROCEDURES = [
@@ -20,10 +20,20 @@
     return window;
   })();
 
-  if (window[APP_KEY]) {
-    window[APP_KEY].show();
-    window[APP_KEY].refresh();
-    return;
+  const existingApp = window[APP_KEY];
+  if (existingApp) {
+    if (existingApp.version === VERSION) {
+      existingApp.show();
+      existingApp.refresh();
+      return;
+    }
+    if (existingApp.state?.running) {
+      alert("Eski sürümde işlem devam ediyor. İşlem tamamlandıktan sonra bookmark'a yeniden basın.");
+      return;
+    }
+    try { existingApp.destroy?.(); } catch (_) {}
+    try { document.getElementById(PANEL_ID)?.remove(); } catch (_) {}
+    try { delete window[APP_KEY]; } catch (_) { window[APP_KEY] = null; }
   }
 
   const state = {
@@ -674,8 +684,10 @@
   }
 
   window[APP_KEY] = {
+    version: VERSION,
     show() { const panel = document.getElementById(PANEL_ID); if (panel) panel.style.display = "block"; },
     refresh() { try { collectPatients(); } catch (error) { state.message = clean(error.message); render(); } },
+    destroy() { const panel = document.getElementById(PANEL_ID); if (panel) panel.remove(); },
     state
   };
 
