@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_BULK_CLINICAL_PROCEDURE__";
   const PANEL_ID = "fonet-toplu-klinik-islem-guvenli";
-  const VERSION = "1.0.2";
+  const VERSION = "1.0.3";
   const HISTORY_FRESH_MS = 60 * 1000;
   const HOUR_MS = 60 * 60 * 1000;
   const PROCEDURES = [
@@ -58,6 +58,13 @@
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+
+  // FONET'in ExtJS istemcisi tarihleri yerel saatle, milisaniye ve saat dilimi
+  // eki olmadan gönderiyor. Date#toISOString() kullanmak Java servisini bozar.
+  function fonetDateTime(date = new Date()) {
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  }
 
   function apiBase() {
     let origin = "http://hbys.bursa.yerel";
@@ -480,11 +487,11 @@
   }
 
   async function addProceduresForPatient(patient, procedures) {
-    const nowIso = new Date().toISOString();
+    const istemTarihi = fonetDateTime();
     const checkPayload = procedures.map((procedure) => ({
       makroKodu: procedure.code,
       fromTopluIstem: true,
-      hastaHizmet: { birimSevk: { id: Number(patient.birimSevkId) || patient.birimSevkId }, istemTarihi: nowIso }
+      hastaHizmet: { birimSevk: { id: Number(patient.birimSevkId) || patient.birimSevkId }, istemTarihi }
     }));
     const checked = await apiPost("/Tibbi/HastaHizmet/checkAddHastaHizmetList", checkPayload);
     const checkFailure = businessFailure(checked);
