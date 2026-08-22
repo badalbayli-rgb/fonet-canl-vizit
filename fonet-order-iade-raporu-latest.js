@@ -1,0 +1,574 @@
+(() => {
+  "use strict";
+
+  const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
+  const PANEL_ID = "fonet-order-iade-raporu";
+  const VERSION = "1.0.0";
+  const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
+
+  const clean = (value) => String(value == null ? "" : value)
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const norm = (value) => clean(value).toLocaleLowerCase("tr-TR");
+  const escapeHtml = (value) => clean(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+  function localInputDate(date) {
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  }
+
+  function yesterdayInput() {
+    const date = new Date();
+    date.setDate(date.getDate() - 1);
+    return localInputDate(date);
+  }
+
+  function serviceDate(input, endOfDay = false) {
+    const match = clean(input).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return "";
+    return `${match[3]}.${match[2]}.${match[1]} ${endOfDay ? "23:59:59" : "00:00:00"}`;
+  }
+
+  function parseDate(value) {
+    if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+    if (typeof value === "number" && value > 1000000000) return new Date(value);
+    const text = clean(value);
+    if (!text) return null;
+    const dotNet = text.match(/\/Date\((\d+)/);
+    if (dotNet) return new Date(Number(dotNet[1]));
+    const tr = text.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    if (tr) {
+      const date = new Date(Number(tr[3]), Number(tr[2]) - 1, Number(tr[1]), Number(tr[4] || 0), Number(tr[5] || 0), Number(tr[6] || 0));
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+    const parsed = new Date(text);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  function formatDateTime(value) {
+    const date = value instanceof Date ? value : parseDate(value);
+    if (!date) return "-";
+    return new Intl.DateTimeFormat("tr-TR", { dateStyle: "short", timeStyle: "short" }).format(date);
+  }
+
+  function dateKey(value) {
+    const date = value instanceof Date ? value : parseDate(value);
+    return date ? localInputDate(date) : "bilinmiyor";
+  }
+
+  function displayDateKey(key) {
+    const match = clean(key).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return match ? `${match[3]}.${match[2]}.${match[1]}` : "Tarihi bilinmiyor";
+  }
+
+  function namedText(value) {
+    if (value == null) return "";
+    if (typeof value === "string" || typeof value === "number") return clean(value);
+    if (typeof value !== "object") return "";
+    return clean(value.adi || value.ad || value.name || value.text || value.label || value.aciklama || value.tanim || value.koduAdi || "");
+  }
+
+  function readPath(object, path) {
+    return String(path).split(".").reduce((current, key) => current == null ? undefined : current[key], object);
+  }
+
+  function firstValue(object, paths) {
+    for (const path of paths) {
+      const value = readPath(object, path);
+      if (value != null && value !== "") return value;
+    }
+    return "";
+  }
+
+  function allContexts() {
+    const output = [];
+    const seen = new Set();
+    function walk(win) {
+      if (!win || seen.has(win)) return;
+      seen.add(win);
+      try {
+        if (win.document) output.push(win);
+        for (let index = 0; index < win.frames.length; index += 1) walk(win.frames[index]);
+      } catch (_) {}
+    }
+    try { walk(window.top); } catch (_) {}
+    try { walk(window.opener); } catch (_) {}
+    walk(window);
+    return output;
+  }
+
+  function recordsFromStore(store) {
+    const output = [];
+    try { store?.each?.((record) => output.push(record)); } catch (_) {}
+    try { if (!output.length && store?.getRange) output.push(...store.getRange()); } catch (_) {}
+    try { if (!output.length && Array.isArray(store?.data?.items)) output.push(...store.data.items); } catch (_) {}
+    return output;
+  }
+
+  function recordValue(record, paths) {
+    for (const path of paths) {
+      try {
+        const value = record?.get?.(path);
+        if (value != null && value !== "") return value;
+      } catch (_) {}
+      const value = readPath(record?.data || record?.raw || record || {}, path);
+      if (value != null && value !== "") return value;
+    }
+    return "";
+  }
+
+  function gridColumns(grid) {
+    try { return grid.getColumnManager?.().getColumns?.() || grid.headerCt?.getGridColumns?.() || grid.columns || []; } catch (_) { return []; }
+  }
+
+  function patientGridScore(grid) {
+    const records = recordsFromStore(grid?.getStore?.() || grid?.store);
+    const columns = gridColumns(grid);
+    const text = norm(columns.map((column) => `${clean(column.text)} ${clean(column.dataIndex)} ${clean(column.name)}`).join(" "));
+    const keys = norm(records.slice(0, 3).map((record) => Object.keys(record?.data || record?.raw || {}).join(" ")).join(" "));
+    let score = 0;
+    if (/adı soyadı|adi soyadi|adisoyadi/.test(text)) score += 18;
+    if (/oda no|odano|yatak/.test(text)) score += 8;
+    if (/doktor|personel/.test(text)) score += 4;
+    if (/birimsevk|birim sevk/.test(`${text} ${keys}`)) score += 14;
+    if (/gelisid|geliş id|hasta/.test(`${text} ${keys}`)) score += 7;
+    if (/tedavi adı|stok adı|order|laboratuvar|radyoloji/.test(text)) score -= 12;
+    if (records.length > 1) score += 3;
+    return { score, records };
+  }
+
+  function collectPatients() {
+    const candidates = [];
+    for (const context of allContexts()) {
+      try {
+        const grids = context.Ext?.ComponentQuery?.query?.("gridpanel, grid") || [];
+        grids.forEach((grid) => {
+          const result = patientGridScore(grid);
+          if (result.records.length) candidates.push({ context, grid, ...result });
+        });
+      } catch (_) {}
+    }
+    candidates.sort((a, b) => b.score - a.score || b.records.length - a.records.length);
+    if (!candidates.length || candidates[0].score < 25) throw new Error("FONET Klinik hasta listesi bulunamadı. Klinik ekranını ve hasta listesini açık tutun.");
+    const unique = new Map();
+    candidates[0].records.forEach((record, index) => {
+      const data = record?.data || record?.raw || record || {};
+      const birimSevkId = clean(recordValue(record, ["birimSevkId", "BIRIM_SEVK_ID", "hastaBirimSevkId", "klinik.birimSevk.id", "birimSevk.id", "id"]));
+      const adSoyad = clean(recordValue(record, ["adiSoyadi", "adSoyad", "hastaAdiSoyadi", "ADSOYAD", "hasta.adiSoyadi"]));
+      const oda = clean(recordValue(record, ["odaNo", "ODANO", "ODA_NO", "klinik.yatak.oda.odaNo"]));
+      const yatak = clean(recordValue(record, ["yatakNo", "YATAKNO", "YATAK_NO", "klinik.yatak.yatakNo"]));
+      if (!birimSevkId || !adSoyad) return;
+      if (!unique.has(birimSevkId)) unique.set(birimSevkId, { index, birimSevkId, adSoyad, oda: [oda, yatak].filter(Boolean).join("/") || "-", raw: data });
+    });
+    if (!unique.size) throw new Error("Hasta listesinden birim/sevk bilgisi okunamadı.");
+    state.sourceContext = candidates[0].context;
+    state.patients = [...unique.values()];
+    return state.patients;
+  }
+
+  function apiOrigin() {
+    for (const context of [state.sourceContext, ...allContexts()]) {
+      try { if (/^https?:$/i.test(context.location.protocol)) return context.location.origin; } catch (_) {}
+    }
+    return "http://hbys.bursa.yerel";
+  }
+
+  async function apiGet(path, params, signal) {
+    const query = new URLSearchParams(params);
+    query.set("_dc", String(Date.now()));
+    const context = state.sourceContext || window;
+    const fetchFunction = context.fetch?.bind(context) || fetch.bind(window);
+    const response = await fetchFunction(`${apiOrigin()}/hbys-rs/hbys${path}?${query}`, {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store",
+      signal,
+      headers: { "Accept": "application/json, text/plain, */*", "X-Requested-With": "XMLHttpRequest" }
+    });
+    const text = await response.text();
+    let payload;
+    try { payload = text ? JSON.parse(text) : {}; } catch (_) { payload = { text }; }
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${clean(text).slice(0, 300)}`);
+    const failure = businessFailure(payload);
+    if (failure) throw new Error(failure);
+    return payload;
+  }
+
+  function businessFailure(payload) {
+    const objects = [payload, payload?.data, payload?.jsonArray, payload?.jsonArray?.data].filter((value) => value && typeof value === "object");
+    for (const object of objects) {
+      if (object.OK === false || object.ok === false || object.success === false || object.success === "false") {
+        return clean(object.message || object.mesaj || object.msg || object.exception?.message || "FONET sorguyu reddetti.");
+      }
+      if (object.exception) return clean(object.exception.message || object.exception.description || object.exception) || "FONET sorgu hatası.";
+    }
+    return "";
+  }
+
+  function responseRows(payload) {
+    const choices = [payload?.data?.data, payload?.data, payload?.jsonArray?.data, payload?.rows, payload];
+    return choices.find(Array.isArray) || [];
+  }
+
+  function enumLabel(typeKey, typeName, value) {
+    const direct = namedText(value);
+    if (direct && !/^\d+$/.test(direct)) return direct;
+    const id = value && typeof value === "object" ? value.id ?? value.value : value;
+    if (id == null || id === "") return "Belirtilmemiş";
+    const context = state.sourceContext || window;
+    try {
+      const enumType = context.enumStoreTip?.[typeKey] || typeName;
+      const store = context.getEnumStore?.(enumType);
+      const records = recordsFromStore(store);
+      const match = records.find((record) => String(recordValue(record, ["id", "value", "kodu", "kod"])) === String(id));
+      const text = clean(recordValue(match, ["adi", "ad", "name", "text", "label", "aciklama"]));
+      if (text) return text;
+    } catch (_) {}
+    return `Kod ${clean(id)}`;
+  }
+
+  function numberValue(value) {
+    if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+    const normalized = clean(value).replace(/\s/g, "").replace(",", ".").replace(/[^0-9.-]/g, "");
+    const number = Number(normalized);
+    return Number.isFinite(number) ? number : 0;
+  }
+
+  function normalizeReturn(raw, patient) {
+    const row = raw?.data || raw?.raw || raw || {};
+    const returnDateRaw = firstValue(row, ["orderIadeTarih", "iadeTarihi", "iadeTarih"]);
+    const returnDate = parseDate(returnDateRaw);
+    const orderDateRaw = firstValue(row, ["tarih", "eorderPlan.tarih", "eorderPlan.eorder.baslangicTarihi", "istemTarihi"]);
+    const quantityRaw = firstValue(row, ["iadeMiktar", "orderIadeMiktar", "miktar"]);
+    const stock = firstValue(row, ["stok", "eorderPlan.eorder.stok", "eorderPlan.stok"]);
+    const drugName = clean(namedText(stock) || firstValue(row, ["stokAdi", "eorderPlaneorderstokadi", "tedaviAdi", "ilacAdi"]) || "İlaç adı okunamadı");
+    const reasonRaw = firstValue(row, ["orderIadeNeden", "iadeNeden"]);
+    const statusRaw = firstValue(row, ["orderIade", "iadeDurumu"]);
+    return {
+      id: clean(firstValue(row, ["id", "eorderPlanDetayId"]) || `${patient.birimSevkId}-${Math.random()}`),
+      patientKey: patient.birimSevkId,
+      patientName: patient.adSoyad,
+      room: patient.oda,
+      drugName,
+      stockCode: clean(firstValue(row, ["stok.kodu", "eorderPlan.eorder.stok.kodu", "eorderPlaneorderstokkodu"])),
+      quantity: numberValue(quantityRaw),
+      quantityText: clean(quantityRaw),
+      orderDate: parseDate(orderDateRaw),
+      returnDate,
+      returnDateRaw: clean(returnDateRaw),
+      rejected: Boolean(parseDate(firstValue(row, ["orderRedTarih", "iadeRedTarih"]))),
+      reason: enumLabel("StokOrderIadeNeden_tr_com_fonet_hbys_common_enums", "tr.com.fonet.hbys.common.enums.StokOrderIadeNeden", reasonRaw),
+      status: enumLabel("StokOrderIadeDurum_tr_com_fonet_hbys_common_enums", "tr.com.fonet.hbys.common.enums.StokOrderIadeDurum", statusRaw),
+      explanation: clean(firstValue(row, ["orderIadeAciklama", "iadeAciklama", "aciklama"])),
+      returnPerson: clean(namedText(firstValue(row, ["orderIadeKullanici.kimlik", "orderIadeKullanici", "iadePersonelAdi"]))),
+      depot: clean(namedText(firstValue(row, ["eorderPlan.depo", "depo"]))),
+      orderNo: clean(firstValue(row, ["orderNo", "eorderPlan.eorder.orderNo"])),
+      raw: row
+    };
+  }
+
+  function rangeBounds(startInput, endInput) {
+    const start = parseDate(`${startInput}T00:00:00`);
+    const end = parseDate(`${endInput}T23:59:59`);
+    return { start, end };
+  }
+
+  function withinRange(date, start, end) {
+    return date instanceof Date && !Number.isNaN(date.getTime()) && date >= start && date <= end;
+  }
+
+  async function fetchPatientReturns(patient, startInput, endInput, signal) {
+    const patientFilter =
+      { index: 1, property: "eorderPlan.eorder.birimSevk.id", value: Number(patient.birimSevkId) || patient.birimSevkId, type: "Long", operator: "=", filterType: "kriterPanel" };
+    const filters = [
+      patientFilter,
+      { index: 2, property: "orderIadeTarih", value: serviceDate(startInput, false), type: "date", operator: ">=", filterType: "kriterPanel" },
+      { index: 3, property: "orderIadeTarih", value: serviceDate(endInput, true), type: "date", operator: "<=", filterType: "kriterPanel" }
+    ];
+    const request = (requestFilters) => apiGet(ENDPOINT, {
+        autoStores: JSON.stringify(["orderIade", "orderIadeNeden", "uygulamaDurumu", "stokTuru"]),
+        filterMap: "",
+        filter: JSON.stringify(requestFilters),
+        page: "1",
+        start: "0",
+        limit: "10000"
+      }, signal);
+    let payload;
+    try {
+      payload = await request(filters);
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      // Bazı FONET kurulumları iade tarihi alanını sunucu filtresinde kabul etmiyor.
+      // Bu durumda yalnızca aynı hastanın kayıtları okunur ve tarih yerelde süzülür.
+      payload = await request([patientFilter]);
+      state.fallbackCount += 1;
+    }
+    const bounds = rangeBounds(startInput, endInput);
+    return responseRows(payload)
+      .map((row) => normalizeReturn(row, patient))
+      .filter((row) => !row.rejected && withinRange(row.returnDate, bounds.start, bounds.end));
+  }
+
+  async function runPool(items, limit, worker) {
+    let cursor = 0;
+    const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (cursor < items.length && !state.cancelRequested) {
+        const index = cursor++;
+        await worker(items[index], index);
+      }
+    });
+    await Promise.all(runners);
+  }
+
+  function groupRows(rows, keyFunction) {
+    const map = new Map();
+    rows.forEach((row) => {
+      const key = clean(keyFunction(row)) || "Belirtilmemiş";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(row);
+    });
+    return map;
+  }
+
+  function summarize(rows) {
+    const byDrug = [...groupRows(rows, (row) => row.drugName)].map(([name, items]) => ({
+      name,
+      lines: items.length,
+      quantity: items.reduce((sum, item) => sum + item.quantity, 0),
+      patients: new Set(items.map((item) => item.patientKey)).size
+    })).sort((a, b) => b.quantity - a.quantity || b.lines - a.lines || a.name.localeCompare(b.name, "tr"));
+    const countMap = (selector) => [...groupRows(rows, selector)].map(([name, items]) => ({
+      name,
+      lines: items.length,
+      quantity: items.reduce((sum, item) => sum + item.quantity, 0)
+    })).sort((a, b) => b.quantity - a.quantity || b.lines - a.lines || a.name.localeCompare(b.name, "tr"));
+    return {
+      lines: rows.length,
+      quantity: rows.reduce((sum, row) => sum + row.quantity, 0),
+      patientCount: new Set(rows.map((row) => row.patientKey)).size,
+      drugCount: new Set(rows.map((row) => norm(row.drugName))).size,
+      byDrug,
+      byReason: countMap((row) => row.reason),
+      byReturnDate: countMap((row) => displayDateKey(dateKey(row.returnDate))),
+      byOrderDate: countMap((row) => displayDateKey(dateKey(row.orderDate)))
+    };
+  }
+
+  function quantityText(value) {
+    return new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 3 }).format(Number(value) || 0);
+  }
+
+  function filteredRows() {
+    const search = norm(state.search);
+    if (!search) return state.rows;
+    return state.rows.filter((row) => norm([row.patientName, row.room, row.drugName, row.reason, row.status, row.explanation, row.stockCode].join(" ")).includes(search));
+  }
+
+  function updateStatus() {
+    const element = document.getElementById("foir-status");
+    if (element) element.textContent = state.message;
+  }
+
+  async function runReport() {
+    if (state.running) return;
+    const startInput = clean(document.getElementById("foir-start")?.value || state.startInput);
+    const endInput = clean(document.getElementById("foir-end")?.value || state.endInput);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startInput) || !/^\d{4}-\d{2}-\d{2}$/.test(endInput) || startInput > endInput) {
+      alert("Geçerli bir başlangıç ve bitiş tarihi seçin.");
+      return;
+    }
+    state.startInput = startInput;
+    state.endInput = endInput;
+    state.running = true;
+    state.cancelRequested = false;
+    state.rows = [];
+    state.errors = [];
+    state.fallbackCount = 0;
+    state.controller = new AbortController();
+    try {
+      collectPatients();
+      state.message = `${state.patients.length} hasta için iade kayıtları okunuyor...`;
+      render();
+      let completed = 0;
+      await runPool(state.patients, 4, async (patient) => {
+        try {
+          state.rows.push(...await fetchPatientReturns(patient, startInput, endInput, state.controller.signal));
+        } catch (error) {
+          if (error?.name !== "AbortError") state.errors.push({ patient: `${patient.oda} · ${patient.adSoyad}`, message: clean(error.message) });
+        }
+        completed += 1;
+        state.message = `Sorgu: ${completed}/${state.patients.length} hasta · ${state.rows.length} iade satırı`;
+        updateStatus();
+      });
+      state.rows.sort((a, b) => a.patientName.localeCompare(b.patientName, "tr") || (b.returnDate || 0) - (a.returnDate || 0));
+      state.message = state.cancelRequested
+        ? `Sorgu durduruldu. Okunan ${state.rows.length} satır gösteriliyor.`
+        : `Tamamlandı: ${state.rows.length} iade satırı · ${summarize(state.rows).patientCount} hasta · Hatalı sorgu ${state.errors.length}${state.fallbackCount ? ` · Yerel tarih süzme ${state.fallbackCount} hasta` : ""}`;
+    } finally {
+      state.running = false;
+      state.controller = null;
+      render();
+    }
+  }
+
+  function csvCell(value) {
+    const text = clean(value).replace(/"/g, '""');
+    return `"${text}"`;
+  }
+
+  function exportCsv() {
+    const rows = filteredRows();
+    if (!rows.length) { alert("Dışa aktarılacak iade kaydı yok."); return; }
+    const header = ["Hasta", "Oda/Yatak", "İlaç", "Stok Kodu", "İade Miktarı", "Order/Uygulama Tarihi", "İade Tarihi", "İade Nedeni", "Durum", "Açıklama", "İade Personeli", "Order No"];
+    const lines = [header, ...rows.map((row) => [row.patientName, row.room, row.drugName, row.stockCode, quantityText(row.quantity), formatDateTime(row.orderDate), formatDateTime(row.returnDate), row.reason, row.status, row.explanation, row.returnPerson, row.orderNo])];
+    const blob = new Blob(["\uFEFF", lines.map((line) => line.map(csvCell).join(";")).join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `fonet-order-iade-${state.startInput}-${state.endInput}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function copySummary() {
+    const rows = filteredRows();
+    const summary = summarize(rows);
+    const top = summary.byDrug.slice(0, 10).map((item, index) => `${index + 1}. ${item.name}: ${quantityText(item.quantity)} (${item.lines} satır, ${item.patients} hasta)`).join("\n");
+    const text = [
+      `FONET Order İade Raporu (${state.startInput} – ${state.endInput})`,
+      `İade satırı: ${summary.lines} | Toplam miktar: ${quantityText(summary.quantity)} | Hasta: ${summary.patientCount} | İlaç: ${summary.drugCount}`,
+      summary.byDrug[0] ? `En çok iade edilen ilaç: ${summary.byDrug[0].name} — ${quantityText(summary.byDrug[0].quantity)}` : "İade kaydı yok.",
+      "",
+      "En çok iade edilen ilaçlar:",
+      top || "-"
+    ].join("\n");
+    try { await navigator.clipboard.writeText(text); state.message = "Rapor özeti panoya kopyalandı."; } catch (_) { alert(text); }
+    updateStatus();
+  }
+
+  function printReport() {
+    const rows = filteredRows();
+    if (!rows.length) { alert("Yazdırılacak iade kaydı yok."); return; }
+    const summary = summarize(rows);
+    const win = window.open("", "_blank", "width=1200,height=850");
+    if (!win) { alert("Yazdırma penceresi açılamadı."); return; }
+    win.document.write(`<!doctype html><meta charset="utf-8"><title>FONET Order İade Raporu</title><style>body{font:12px Arial;color:#111;padding:24px}h1{font-size:22px}.cards{display:flex;gap:12px;margin:14px 0}.card{border:1px solid #bbb;padding:10px;min-width:150px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #bbb;padding:6px;text-align:left}th{background:#eee}</style><h1>FONET Order İade Raporu</h1><p>${escapeHtml(state.startInput)} – ${escapeHtml(state.endInput)}</p><div class="cards"><div class="card">İade satırı<br><b>${summary.lines}</b></div><div class="card">Toplam miktar<br><b>${quantityText(summary.quantity)}</b></div><div class="card">Hasta<br><b>${summary.patientCount}</b></div><div class="card">En çok iade<br><b>${escapeHtml(summary.byDrug[0]?.name || "-")}</b></div></div><table><thead><tr><th>Hasta</th><th>Oda</th><th>İlaç</th><th>Miktar</th><th>Order tarihi</th><th>İade tarihi</th><th>Neden</th><th>Açıklama</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${escapeHtml(row.patientName)}</td><td>${escapeHtml(row.room)}</td><td>${escapeHtml(row.drugName)}</td><td>${quantityText(row.quantity)}</td><td>${escapeHtml(formatDateTime(row.orderDate))}</td><td>${escapeHtml(formatDateTime(row.returnDate))}</td><td>${escapeHtml(row.reason)}</td><td>${escapeHtml(row.explanation)}</td></tr>`).join("")}</tbody></table>`);
+    win.document.close();
+    setTimeout(() => win.print(), 250);
+  }
+
+  function metricCard(label, value, detail = "") {
+    return `<div style="padding:11px 13px;border:1px solid #bfdbfe;border-radius:10px;background:#eff6ff;min-width:150px;flex:1;"><div style="font-size:11px;color:#475569;font-weight:700;">${escapeHtml(label)}</div><div style="font-size:22px;font-weight:900;color:#0f172a;">${escapeHtml(value)}</div><div style="font-size:10px;color:#64748b;">${escapeHtml(detail)}</div></div>`;
+  }
+
+  function barRows(items, label) {
+    const maximum = Math.max(1, ...items.map((item) => item.quantity || item.lines));
+    return items.length ? items.map((item, index) => `<div style="display:grid;grid-template-columns:28px minmax(180px,1fr) 2fr 95px;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid #e2e8f0;"><b>${index + 1}</b><span title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span><div style="height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden;"><div style="height:100%;width:${Math.max(2, Math.round(((item.quantity || item.lines) / maximum) * 100))}%;background:#2563eb;"></div></div><b style="text-align:right;">${quantityText(item.quantity)} ${escapeHtml(label)}</b></div>`).join("") : `<div style="padding:18px;color:#64748b;">Kayıt yok.</div>`;
+  }
+
+  function patientReportHtml(rows) {
+    const groups = groupRows(rows, (row) => row.patientKey);
+    return [...groups.values()].map((items) => {
+      const first = items[0];
+      const total = items.reduce((sum, item) => sum + item.quantity, 0);
+      return `<section style="margin-bottom:12px;border:1px solid #cbd5e1;border-radius:10px;overflow:hidden;"><div style="display:flex;justify-content:space-between;gap:12px;padding:9px 12px;background:#f1f5f9;"><b>${escapeHtml(first.room)} · ${escapeHtml(first.patientName)}</b><span>${items.length} satır · ${quantityText(total)} miktar</span></div><div style="overflow:auto;"><table style="border-collapse:collapse;width:100%;min-width:950px;"><thead><tr><th>İlaç</th><th>Miktar</th><th>Order/Uygulama tarihi</th><th>İade tarihi</th><th>İade nedeni</th><th>Durum</th><th>Açıklama</th></tr></thead><tbody>${items.map((row) => `<tr><td><b>${escapeHtml(row.drugName)}</b><br><small>${escapeHtml(row.stockCode)}</small></td><td>${quantityText(row.quantity)}</td><td>${escapeHtml(formatDateTime(row.orderDate))}</td><td>${escapeHtml(formatDateTime(row.returnDate))}</td><td>${escapeHtml(row.reason)}</td><td>${escapeHtml(row.status)}</td><td>${escapeHtml(row.explanation || "-")}</td></tr>`).join("")}</tbody></table></div></section>`;
+    }).join("") || `<div style="padding:30px;text-align:center;color:#64748b;">Seçilen tarih aralığında iade kaydı bulunmadı.</div>`;
+  }
+
+  function analysisHtml(summary) {
+    return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(390px,1fr));gap:14px;"><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">En çok iade edilen ilaçlar</h3>${barRows(summary.byDrug.slice(0, 20), "")}</section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">İade nedenleri</h3>${barRows(summary.byReason, "")}</section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">İade tarihine göre</h3>${barRows(summary.byReturnDate, "")}</section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">Order/Uygulama giriş tarihine göre</h3><p style="margin:0 0 7px;color:#64748b;font-size:11px;">Hangi tarihteki order kayıtlarının seçilen dönemde iade edildiğini gösterir.</p>${barRows(summary.byOrderDate, "")}</section></div>`;
+  }
+
+  function render() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+    const oldScroller = panel.querySelector("#foir-scroll");
+    const scrollTop = Number(oldScroller?.scrollTop) || 0;
+    const rows = filteredRows();
+    const summary = summarize(rows);
+    const errorHtml = state.errors.length ? `<details style="margin-top:8px;color:#991b1b;"><summary>${state.errors.length} hasta sorgulanamadı</summary>${state.errors.map((item) => `<div>${escapeHtml(item.patient)}: ${escapeHtml(item.message)}</div>`).join("")}</details>` : "";
+    panel.innerHTML = `<header style="display:flex;justify-content:space-between;gap:12px;padding:12px 14px;background:#0f172a;color:#fff;"><div><b>FONET Order İade Analiz Raporu v${VERSION}</b><div style="font-size:11px;color:#cbd5e1;margin-top:3px;">Salt okunur · Veriler yalnızca bu tarayıcıda işlenir</div></div><button id="foir-close" class="foir-danger">Kapat</button></header><div style="padding:10px 12px;background:#f8fafc;border-bottom:1px solid #cbd5e1;"><div style="display:flex;gap:7px;align-items:end;flex-wrap:wrap;"><label>Başlangıç<br><input id="foir-start" type="date" value="${escapeHtml(state.startInput)}"></label><label>Bitiş<br><input id="foir-end" type="date" value="${escapeHtml(state.endInput)}"></label><button id="foir-yesterday">Dün</button><button id="foir-seven">Son 7 Gün</button><button id="foir-run" class="foir-primary">İadeleri Getir ve Analiz Et</button><button id="foir-stop" class="foir-danger">Durdur</button><button id="foir-csv">CSV İndir</button><button id="foir-copy">Özeti Kopyala</button><button id="foir-print">Yazdır</button></div><div style="display:flex;gap:7px;align-items:center;margin-top:8px;flex-wrap:wrap;"><input id="foir-search" placeholder="Hasta, oda, ilaç veya iade nedeni ara" value="${escapeHtml(state.search)}" style="min-width:320px;flex:1;"><button id="foir-patient-view" class="${state.view === "patient" ? "foir-active" : ""}">Hasta Bazlı</button><button id="foir-analysis-view" class="${state.view === "analysis" ? "foir-active" : ""}">Analiz</button></div><div id="foir-status" style="margin-top:7px;font-size:12px;color:#334155;">${escapeHtml(state.message)}</div>${errorHtml}</div><div id="foir-scroll" style="height:calc(88vh - 218px);overflow:auto;padding:12px;background:#fff;"><div style="display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px;">${metricCard("İade satırı", String(summary.lines))}${metricCard("Toplam iade miktarı", quantityText(summary.quantity))}${metricCard("Hasta", String(summary.patientCount))}${metricCard("Farklı ilaç", String(summary.drugCount))}${metricCard("En çok iade edilen", summary.byDrug[0]?.name || "-", summary.byDrug[0] ? `${quantityText(summary.byDrug[0].quantity)} miktar · ${summary.byDrug[0].patients} hasta` : "")}</div>${state.view === "analysis" ? analysisHtml(summary) : patientReportHtml(rows)}</div>`;
+    panel.querySelectorAll("button,input").forEach((element) => Object.assign(element.style, { border: "1px solid #94a3b8", borderRadius: "7px", padding: "7px 9px", fontWeight: element.tagName === "BUTTON" ? "800" : "500" }));
+    panel.querySelectorAll("button").forEach((button) => { button.style.cursor = "pointer"; });
+    panel.querySelectorAll("th,td").forEach((cell) => Object.assign(cell.style, { borderBottom: "1px solid #e2e8f0", padding: "7px", textAlign: "left", verticalAlign: "top" }));
+    panel.querySelectorAll("th").forEach((cell) => { cell.style.background = "#f8fafc"; cell.style.position = "sticky"; cell.style.top = "0"; });
+    panel.querySelector("#foir-run").style.background = "#2563eb"; panel.querySelector("#foir-run").style.color = "#fff";
+    panel.querySelectorAll(".foir-danger").forEach((button) => { button.style.background = "#dc2626"; button.style.color = "#fff"; });
+    panel.querySelectorAll(".foir-active").forEach((button) => { button.style.background = "#0f766e"; button.style.color = "#fff"; });
+    const scroller = panel.querySelector("#foir-scroll");
+    if (scroller) scroller.scrollTop = scrollTop;
+    panel.querySelector("#foir-close").onclick = () => { if (!state.running) panel.style.display = "none"; };
+    panel.querySelector("#foir-run").onclick = runReport;
+    panel.querySelector("#foir-stop").onclick = () => { state.cancelRequested = true; state.controller?.abort(); state.message = "Durdurma istendi; tamamlanan sonuçlar korunacak."; updateStatus(); };
+    panel.querySelector("#foir-yesterday").onclick = () => { state.startInput = yesterdayInput(); state.endInput = state.startInput; render(); };
+    panel.querySelector("#foir-seven").onclick = () => { const end = new Date(); end.setDate(end.getDate() - 1); const start = new Date(end); start.setDate(start.getDate() - 6); state.startInput = localInputDate(start); state.endInput = localInputDate(end); render(); };
+    panel.querySelector("#foir-csv").onclick = exportCsv;
+    panel.querySelector("#foir-copy").onclick = copySummary;
+    panel.querySelector("#foir-print").onclick = printReport;
+    panel.querySelector("#foir-patient-view").onclick = () => { state.view = "patient"; render(); };
+    panel.querySelector("#foir-analysis-view").onclick = () => { state.view = "analysis"; render(); };
+    panel.querySelector("#foir-search").onchange = (event) => { state.search = clean(event.target.value); render(); };
+    panel.querySelector("#foir-run").disabled = state.running;
+    panel.querySelector("#foir-stop").disabled = !state.running;
+  }
+
+  function makePanel() {
+    document.getElementById(PANEL_ID)?.remove();
+    const panel = document.createElement("section");
+    panel.id = PANEL_ID;
+    Object.assign(panel.style, { position: "fixed", right: "10px", bottom: "10px", width: "min(1460px,calc(100vw - 20px))", height: "88vh", zIndex: "2147483647", background: "#fff", color: "#0f172a", border: "1px solid #334155", borderRadius: "12px", boxShadow: "0 22px 65px rgba(0,0,0,.42)", overflow: "hidden", fontFamily: "Arial,sans-serif" });
+    document.body.appendChild(panel);
+    render();
+  }
+
+  const existing = window[APP_KEY];
+  if (existing) {
+    if (existing.version === VERSION) { existing.show(); existing.collectPatients(); return; }
+    if (existing.state?.running) { alert("Eski sürümde sorgu devam ediyor. Önce durdurun."); return; }
+    try { existing.destroy(); } catch (_) {}
+  }
+
+  const state = {
+    sourceContext: null,
+    patients: [],
+    rows: [],
+    errors: [],
+    startInput: yesterdayInput(),
+    endInput: yesterdayInput(),
+    search: "",
+    view: "patient",
+    running: false,
+    cancelRequested: false,
+    controller: null,
+    fallbackCount: 0,
+    message: "Hazır. Varsayılan tarih dündür; İadeleri Getir ve Analiz Et düğmesine basın."
+  };
+
+  window[APP_KEY] = {
+    version: VERSION,
+    state,
+    show() { const panel = document.getElementById(PANEL_ID); if (panel) panel.style.display = "block"; },
+    destroy() { state.controller?.abort(); document.getElementById(PANEL_ID)?.remove(); delete window[APP_KEY]; },
+    collectPatients,
+    run: runReport,
+    _test: { parseDate, normalizeReturn, summarize, serviceDate, responseRows }
+  };
+
+  makePanel();
+  try {
+    collectPatients();
+    state.message = `${state.patients.length} hasta bulundu. Varsayılan olarak dünkü iadeler sorgulanacak.`;
+    render();
+  } catch (error) {
+    state.message = clean(error.message);
+    render();
+  }
+})();
