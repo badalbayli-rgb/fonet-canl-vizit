@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FONET Hasta Bazlı Toplu İşlem — Yer İmi</title>
+  <style>
+    :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:#0f172a;color:#f8fafc;font:16px/1.55 Arial,sans-serif}.card{width:min(820px,100%);padding:34px;border:1px solid #334155;border-radius:18px;background:#111827;box-shadow:0 22px 60px #0007}h1{margin:0 0 10px;font-size:29px}p{color:#cbd5e1}.bookmark{display:inline-block;margin:14px 0;padding:15px 20px;border-radius:12px;background:#7c3aed;color:#fff;text-decoration:none;font-size:19px;font-weight:900;box-shadow:0 10px 28px #7c3aed55;cursor:grab}.bookmark:active{cursor:grabbing}.steps{margin-top:18px;padding:18px;border-radius:12px;background:#1e293b;color:#e2e8f0}.note{margin-top:15px;padding:12px 14px;border-left:4px solid #22c55e;border-radius:8px;background:#052e16;color:#bbf7d0;font-size:14px}.warn{margin-top:15px;padding:12px 14px;border-left:4px solid #f59e0b;border-radius:8px;background:#422006;color:#fde68a;font-size:14px}code{background:#020617;border:1px solid #334155;border-radius:6px;padding:2px 6px}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>FONET Hasta Bazlı Toplu İşlem v1.0.0</h1>
+    <p>Mor düğmeyi fareyle tutup Chrome yer imleri çubuğuna sürükleyin.</p>
+    <a id="bookmark" class="bookmark" href="#">🩺 FONET Toplu İşlem</a>
+    <div class="steps">
+      <b>İşlemler</b>
+      <ul>
+        <li>530310 — Foley sonda: son 72 saatte varsa kapatılır.</li>
+        <li>530340 — NG sonda: son 72 saatte varsa kapatılır.</li>
+        <li>530580 — Yara pansumanı: bugün varsa kapatılır.</li>
+        <li>530030 — Apse yüzeyel: bugün varsa kapatılır.</li>
+      </ul>
+      <b>Kullanım:</b> FONET Klinik hasta listesini açın, yer imine basın ve yalnızca gerçekten uygulanmış işlemleri hasta bazında elle işaretleyin. Yer imleri çubuğu görünmüyorsa <code>Ctrl + Shift + B</code> tuşlarına basın.
+    </div>
+    <div class="warn">Araç hiçbir hastaya kendiliğinden işlem seçmez. Kayıt öncesinde FONET kataloğunu, işlem geçmişini ve mükerrerlik süresini yeniden kontrol eder.</div>
+    <div class="note">Yer imi her kullanımda güncel JS dosyasını GitHub’dan indirir. Hasta bilgileri GitHub’a gönderilmez ve kalıcı olarak saklanmaz.</div>
+  </main>
+  <script>
+    const rawUrl = "https://raw.githubusercontent.com/badalbayli-rgb/fonet-canl-vizit/main/fonet-toplu-klinik-islem-latest.js";
+    const loader = `(async()=>{try{const u=${JSON.stringify(rawUrl)};const r=await fetch(u+'?t='+Date.now(),{cache:'no-store',credentials:'omit'});if(!r.ok)throw new Error('GitHub HTTP '+r.status);const c=await r.text();if(c.length<30000||!c.includes('__FONET_BULK_CLINICAL_PROCEDURE__')||!c.includes('530310')||!c.includes('530340')||!c.includes('530580')||!c.includes('530030')||c.includes('910190'))throw new Error('Toplu işlem dosyası doğrulanamadı');(0,eval)(c+'\\n//# sourceURL=fonet-toplu-klinik-islem-github.js')}catch(e){alert('FONET Toplu İşlem yüklenemedi:\\n'+(e&&e.message?e.message:e))}})()`;
+    document.getElementById("bookmark").href = `javascript:${loader}`;
+  </script>
+</body>
+</html>
