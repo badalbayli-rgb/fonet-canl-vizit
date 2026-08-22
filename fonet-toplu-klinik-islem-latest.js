@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_BULK_CLINICAL_PROCEDURE__";
   const PANEL_ID = "fonet-toplu-klinik-islem-guvenli";
-  const VERSION = "1.0.3";
+  const VERSION = "1.0.4";
   const HISTORY_FRESH_MS = 60 * 1000;
   const HOUR_MS = 60 * 60 * 1000;
   const PROCEDURES = [
@@ -42,6 +42,7 @@
     catalogChecked: false,
     running: false,
     cancelRequested: false,
+    attested: false,
     sourceGridId: "",
     message: "Hazır. Önce FONET hizmet kodları doğrulanacak."
   };
@@ -59,11 +60,10 @@
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 
-  // FONET'in ExtJS istemcisi tarihleri yerel saatle, milisaniye ve saat dilimi
-  // eki olmadan gönderiyor. Date#toISOString() kullanmak Java servisini bozar.
+  // FONET hizmetGirisListesi.js bu servise tarihi "d.m.Y H:i:s" biçiminde gönderiyor.
   function fonetDateTime(date = new Date()) {
     const pad = (value) => String(value).padStart(2, "0");
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+    return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
   }
 
   function apiBase() {
@@ -491,7 +491,13 @@
     const checkPayload = procedures.map((procedure) => ({
       makroKodu: procedure.code,
       fromTopluIstem: true,
-      hastaHizmet: { birimSevk: { id: Number(patient.birimSevkId) || patient.birimSevkId }, istemTarihi }
+      hastaHizmet: {
+        birimSevk: { id: Number(patient.birimSevkId) || patient.birimSevkId },
+        istemTarihi,
+        yapanBirim: null,
+        yapanPersonel: null
+      },
+      engelOrani: 0
     }));
     const checked = await apiPost("/Tibbi/HastaHizmet/checkAddHastaHizmetList", checkPayload);
     const checkFailure = businessFailure(checked);
@@ -519,7 +525,8 @@
       alert("Dört işlem kodunun tamamı FONET kataloğunda doğrulanmadan kayıt gönderilemez.");
       return;
     }
-    if (!document.getElementById("fki-attestation")?.checked) {
+    state.attested = Boolean(document.getElementById("fki-attestation")?.checked);
+    if (!state.attested) {
       alert("Yalnızca bugün gerçekten uygulanan işlemleri seçtiğinizi onaylayın.");
       return;
     }
@@ -593,6 +600,9 @@
   function render() {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
+    const previousScroller = panel.querySelector("#fki-list-scroll");
+    const previousScrollTop = Number(previousScroller?.scrollTop) || 0;
+    const previousScrollLeft = Number(previousScroller?.scrollLeft) || 0;
     const selectedCount = state.patients.reduce((sum, patient) => sum + PROCEDURES.filter((procedure) => patient.procedures[procedure.key].selected).length, 0);
     const catalogHtml = PROCEDURES.map((procedure) => {
       const catalog = state.catalog.get(procedure.key);
@@ -636,10 +646,10 @@
           <button id="fki-stop" style="background:#b91c1c;color:#fff;border-color:#b91c1c;">Durdur</button>
         </div>
         <div style="margin-top:8px;padding:8px;border-radius:8px;background:#fff7ed;color:#9a3412;font-size:12px;"><b>Kural:</b> Foley ve NG son 72 saatte varsa kapatılır. Pansuman ve apse yüzeyel bugün varsa kapatılır; önceki gün kaydı günlük yeniden girişe engel olmaz.</div>
-        <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;font-size:12px;font-weight:700;"><input id="fki-attestation" type="checkbox"><span>Yalnızca bugün gerçekten uygulanan işlemleri işaretlediğimi ve hasta–işlem listesini kontrol ettiğimi onaylıyorum.</span></label>
+        <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;font-size:12px;font-weight:700;"><input id="fki-attestation" type="checkbox" ${state.attested ? "checked" : ""}><span>Yalnızca bugün gerçekten uygulanan işlemleri işaretlediğimi ve hasta–işlem listesini kontrol ettiğimi onaylıyorum.</span></label>
         <div id="fki-summary" style="margin-top:7px;font-size:12px;color:#334155;">Hasta: ${state.patients.length} · İşaretli işlem: ${selectedCount} · ${escapeHtml(state.message)}</div>
       </div>
-      <div style="overflow:auto;height:calc(76vh - 205px);background:#fff;">
+      <div id="fki-list-scroll" style="overflow:auto;height:calc(76vh - 205px);background:#fff;">
         <table style="border-collapse:collapse;width:100%;font:12px Arial,sans-serif;">
           <thead><tr><th style="position:sticky;left:0;top:0;z-index:3;background:#e2e8f0;padding:8px;text-align:left;">Hasta</th>${PROCEDURES.map((procedure) => `<th style="position:sticky;top:0;z-index:2;background:#e2e8f0;padding:8px;text-align:left;">${escapeHtml(procedure.name)}<br><small>${escapeHtml(procedure.rule === "72s" ? "72 saat" : "günde 1")}</small></th>`).join("")}</tr></thead>
           <tbody>${rowsHtml || `<tr><td colspan="5" style="padding:18px;color:#64748b;">Hasta okunmadı.</td></tr>`}</tbody>
@@ -647,6 +657,12 @@
       </div>`;
 
     panel.querySelectorAll("button").forEach((button) => Object.assign(button.style, { border: "1px solid #94a3b8", borderRadius: "7px", padding: "7px 10px", fontWeight: "800", cursor: "pointer" }));
+    const currentScroller = panel.querySelector("#fki-list-scroll");
+    if (currentScroller) {
+      currentScroller.scrollTop = previousScrollTop;
+      currentScroller.scrollLeft = previousScrollLeft;
+    }
+    panel.querySelector("#fki-attestation").onchange = (event) => { state.attested = Boolean(event.target.checked); };
     panel.querySelector("#fki-close").onclick = () => {
       if (state.running) { alert("İşlem sürerken panel kapatılamaz. Önce Durdur düğmesine basın."); return; }
       panel.style.display = "none";
