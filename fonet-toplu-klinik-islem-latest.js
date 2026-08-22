@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_BULK_CLINICAL_PROCEDURE__";
   const PANEL_ID = "fonet-toplu-klinik-islem-guvenli";
-  const VERSION = "1.0.0";
+  const VERSION = "1.0.1";
   const HISTORY_FRESH_MS = 60 * 1000;
   const HOUR_MS = 60 * 60 * 1000;
   const PROCEDURES = [
@@ -296,11 +296,8 @@
           return;
         }
         const required = mandatoryFields(record);
-        if (required.length) {
-          state.catalog.set(procedure.key, { valid: false, detail: `${procedure.code} ek zorunlu alan istiyor (${required.join(", ")}); bu araçtan gönderilmeyecek.`, record });
-          return;
-        }
-        state.catalog.set(procedure.key, { valid: true, detail: `${procedure.code} — ${clean(record.adi || record.koduAdi || procedure.name)}`, record });
+        const requirementNote = required.length ? ` · Ek alanlar kayıt öncesi FONET kural servisinde kontrol edilecek: ${required.join(", ")}` : "";
+        state.catalog.set(procedure.key, { valid: true, warning: required.length > 0, detail: `${procedure.code} — ${clean(record.adi || record.koduAdi || procedure.name)}${requirementNote}`, record });
       });
       state.catalogChecked = true;
       const validCount = [...state.catalog.values()].filter((item) => item.valid).length;
@@ -583,7 +580,11 @@
     const catalogHtml = PROCEDURES.map((procedure) => {
       const catalog = state.catalog.get(procedure.key);
       const ok = catalog?.valid;
-      return `<span title="${escapeHtml(catalog?.detail || "Henüz doğrulanmadı")}" style="padding:4px 7px;border-radius:999px;background:${ok ? "#dcfce7" : "#fee2e2"};color:${ok ? "#166534" : "#991b1b"};font-size:11px;font-weight:800;">${escapeHtml(procedure.code)} ${ok ? "✓" : "?"}</span>`;
+      const warning = ok && catalog?.warning;
+      const background = warning ? "#fef3c7" : ok ? "#dcfce7" : "#fee2e2";
+      const color = warning ? "#92400e" : ok ? "#166534" : "#991b1b";
+      const mark = warning ? "!" : ok ? "✓" : "?";
+      return `<span title="${escapeHtml(catalog?.detail || "Henüz doğrulanmadı")}" style="padding:4px 7px;border-radius:999px;background:${background};color:${color};font-size:11px;font-weight:800;">${escapeHtml(procedure.code)} ${mark}</span>`;
     }).join(" ");
     const rowsHtml = state.patients.map((patient, patientIndex) => {
       const procedureCells = PROCEDURES.map((procedure) => {
