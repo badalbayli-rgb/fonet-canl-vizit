@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
   const PANEL_ID = "fonet-order-iade-raporu";
-  const VERSION = "1.1.0";
+  const VERSION = "1.2.0";
   const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
 
   const clean = (value) => String(value == null ? "" : value)
@@ -135,7 +135,8 @@
   }
 
   function patientGridScore(grid) {
-    const records = recordsFromStore(grid?.getStore?.() || grid?.store);
+    const store = grid?.getStore?.() || grid?.store;
+    const records = recordsFromStore(store);
     const columns = gridColumns(grid);
     const text = norm(columns.map((column) => `${clean(column.text)} ${clean(column.dataIndex)} ${clean(column.name)}`).join(" "));
     const keys = norm(records.slice(0, 3).map((record) => Object.keys(record?.data || record?.raw || {}).join(" ")).join(" "));
@@ -147,10 +148,13 @@
     if (/gelisid|geliş id|hasta/.test(`${text} ${keys}`)) score += 7;
     if (/tedavi adı|stok adı|order|laboratuvar|radyoloji/.test(text)) score -= 12;
     if (records.length > 1) score += 3;
-    return { score, records };
+    const totalCount = Number(store?.getTotalCount?.() ?? store?.totalCount ?? records.length) || records.length;
+    const pageSize = Number(store?.getPageSize?.() ?? store?.pageSize ?? records.length) || records.length || 1;
+    const currentPage = Number(store?.currentPage) || 1;
+    return { score, records, store, totalCount, pageSize, currentPage };
   }
 
-  function collectPatients() {
+  function findPatientGrid() {
     const candidates = [];
     for (const context of allContexts()) {
       try {
@@ -163,8 +167,12 @@
     }
     candidates.sort((a, b) => b.score - a.score || b.records.length - a.records.length);
     if (!candidates.length || candidates[0].score < 25) throw new Error("FONET Klinik hasta listesi bulunamadı. Klinik ekranını ve hasta listesini açık tutun.");
+    return candidates[0];
+  }
+
+  function patientsFromRecords(records) {
     const unique = new Map();
-    candidates[0].records.forEach((record, index) => {
+    records.forEach((record, index) => {
       const data = record?.data || record?.raw || record || {};
       const birimSevkId = clean(recordValue(record, ["birimSevkId", "BIRIM_SEVK_ID", "hastaBirimSevkId", "klinik.birimSevk.id", "birimSevk.id", "id"]));
       const adSoyad = clean(recordValue(record, ["adiSoyadi", "adSoyad", "hastaAdiSoyadi", "ADSOYAD", "hasta.adiSoyadi"]));
@@ -174,8 +182,75 @@
       if (!unique.has(birimSevkId)) unique.set(birimSevkId, { index, birimSevkId, adSoyad, oda: [oda, yatak].filter(Boolean).join("/") || "-", raw: data });
     });
     if (!unique.size) throw new Error("Hasta listesinden birim/sevk bilgisi okunamadı.");
-    state.sourceContext = candidates[0].context;
-    state.patients = [...unique.values()];
+    return [...unique.values()];
+  }
+
+  function collectPatients() {
+    const candidate = findPatientGrid();
+    state.sourceContext = candidate.context;
+    state.sourceStore = candidate.store;
+    state.sourceGrid = candidate.grid;
+    state.sourceTotalCount = candidate.totalCount;
+    state.sourcePageSize = candidate.pageSize;
+    state.sourceCurrentPage = candidate.currentPage;
+    state.sourceLoadedCount = candidate.records.length;
+    state.patients = patientsFromRecords(candidate.records);
+    return state.patients;
+  }
+
+  function loadStorePage(store, page) {
+    if (!store?.loadPage) return Promise.resolve(recordsFromStore(store));
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (callback) => (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        callback(value);
+      };
+      const ok = finish(resolve);
+      const fail = finish(reject);
+      const timer = setTimeout(() => fail(new Error(`FONET hasta listesinin ${page}. sayfası zaman aşımına uğradı.`)), 20000);
+      try {
+        store.loadPage(page, { callback(records, operation, success) {
+          if (success === false) fail(new Error(`FONET hasta listesinin ${page}. sayfası yüklenemedi.`));
+          else ok(Array.isArray(records) && records.length ? records : recordsFromStore(store));
+        } });
+      } catch (error) { fail(error); }
+    });
+  }
+
+  async function collectAllListedPatients() {
+    collectPatients();
+    const store = state.sourceStore;
+    const total = Number(state.sourceTotalCount) || state.patients.length;
+    const pageSize = Math.max(1, Number(state.sourcePageSize) || state.sourceLoadedCount || state.patients.length);
+    const pageCount = Math.ceil(total / pageSize);
+    if (!store?.loadPage || pageCount <= 1 || total <= state.sourceLoadedCount) {
+      state.sourceTotalCount = Math.max(total, state.patients.length);
+      state.sourceLoadedCount = state.patients.length;
+      return state.patients;
+    }
+    if (total > 2500) throw new Error(`FONET hasta listesinde ${total} kayıt var; güvenlik sınırı 2500. Listeyi birim/servis filtresiyle daraltın.`);
+    const originalPage = Number(store.currentPage) || state.sourceCurrentPage || 1;
+    const allRecords = [];
+    let pageError = null;
+    try {
+      for (let page = 1; page <= pageCount; page += 1) {
+        state.message = `FONET listesinin tamamı okunuyor: sayfa ${page}/${pageCount} · ${total} hasta`;
+        updateStatus();
+        allRecords.push(...await loadStorePage(store, page));
+      }
+    } catch (error) {
+      pageError = error;
+    } finally {
+      if ((Number(store.currentPage) || 1) !== originalPage) {
+        try { await loadStorePage(store, originalPage); } catch (_) {}
+      }
+    }
+    if (pageError) throw pageError;
+    state.patients = patientsFromRecords(allRecords);
+    state.sourceLoadedCount = state.patients.length;
     return state.patients;
   }
 
@@ -468,12 +543,13 @@
     state.cancelRequested = false;
     state.rows = [];
     state.selectedDrug = "";
+    state.view = "analysis";
     state.errors = [];
     state.fallbackCount = 0;
     state.controller = new AbortController();
     try {
-      collectPatients();
-      state.message = `${state.patients.length} hasta için iade kayıtları okunuyor...`;
+      await collectAllListedPatients();
+      state.message = `FONET listesindeki ${state.patients.length} hastanın tüm iadeleri birlikte okunuyor...`;
       render();
       let completed = 0;
       await runPool(state.patients, 4, async (patient) => {
@@ -492,7 +568,7 @@
       const summary = summarize(state.rows);
       state.message = state.cancelRequested
         ? `Sorgu durduruldu. Okunan ${rawCount} iade kaydı, ${state.rows.length} birleşik satırda gösteriliyor.`
-        : `Tamamlandı: ${summary.lines} iade kaydı · ${summary.displayLines} birleşik satır · ${summary.patientCount} hasta · Hatalı sorgu ${state.errors.length}${state.fallbackCount ? ` · Yerel tarih süzme ${state.fallbackCount} hasta` : ""}`;
+        : `Tamamlandı: FONET listesindeki ${state.patients.length} hasta tarandı · ${summary.lines} iade kaydı · ${summary.displayLines} birleşik satır · İadesi olan ${summary.patientCount} hasta · Hatalı sorgu ${state.errors.length}${state.fallbackCount ? ` · Yerel tarih süzme ${state.fallbackCount} hasta` : ""}`;
     } finally {
       state.running = false;
       state.controller = null;
@@ -576,7 +652,7 @@
 
   function drugBarRows(items) {
     const maximum = Math.max(1, ...items.map((item) => item.quantity || item.lines));
-    return items.length ? items.map((item, index) => `<button type="button" class="foir-drug-link" data-drug-index="${index}" title="Hangi hastalardan iade edildiğini göster" style="display:grid;grid-template-columns:28px minmax(180px,1fr) 2fr 95px;gap:8px;align-items:center;width:100%;padding:7px 2px;border:0!important;border-bottom:1px solid #e2e8f0!important;border-radius:0!important;background:#fff;text-align:left;"><b>${index + 1}</b><span style="color:#1d4ed8;text-decoration:underline;font-weight:800;">${escapeHtml(item.name)}</span><span style="height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden;"><span style="display:block;height:100%;width:${Math.max(2, Math.round(((item.quantity || item.lines) / maximum) * 100))}%;background:#2563eb;"></span></span><b style="text-align:right;">${quantityText(item.quantity)}</b></button>`).join("") : `<div style="padding:18px;color:#64748b;">Kayıt yok.</div>`;
+    return items.length ? `<div style="display:grid;grid-template-columns:28px minmax(180px,1fr) 85px 75px 1.4fr 90px;gap:8px;padding:6px 2px;background:#f1f5f9;font-size:10px;font-weight:900;"><span>#</span><span>İlaç</span><span>İade kaydı</span><span>Hasta</span><span>Dağılım</span><span style="text-align:right;">Miktar</span></div>${items.map((item, index) => `<button type="button" class="foir-drug-link" data-drug-index="${index}" title="Hangi hastalardan kaç adet iade edildiğini göster" style="display:grid;grid-template-columns:28px minmax(180px,1fr) 85px 75px 1.4fr 90px;gap:8px;align-items:center;width:100%;padding:7px 2px;border:0!important;border-bottom:1px solid #e2e8f0!important;border-radius:0!important;background:#fff;text-align:left;"><b>${index + 1}</b><span style="color:#1d4ed8;text-decoration:underline;font-weight:800;">${escapeHtml(item.name)}</span><b>${item.lines}</b><b>${item.patients}</b><span style="height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden;"><span style="display:block;height:100%;width:${Math.max(2, Math.round(((item.quantity || item.lines) / maximum) * 100))}%;background:#2563eb;"></span></span><b style="text-align:right;">${quantityText(item.quantity)}</b></button>`).join("")}` : `<div style="padding:18px;color:#64748b;">Kayıt yok.</div>`;
   }
 
   function drugDetailHtml(rows, drugName) {
@@ -611,7 +687,7 @@
 
   function analysisHtml(summary) {
     const hourStatements = hourNarrative(summary.byOrderHour).map((text) => `<li style="padding:4px 0;">${escapeHtml(text)}</li>`).join("");
-    return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(390px,1fr));gap:14px;"><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 3px;">En çok iade edilen ilaçlar</h3><p style="margin:0 0 7px;color:#2563eb;font-size:11px;font-weight:700;">Hasta dağılımı için ilaç adına tıklayın.</p>${drugBarRows(summary.byDrug.slice(0, 20))}</section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">En çok iade yapan personel</h3>${countBarRows(summary.byPerson)}</section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">Order saatine göre iade</h3><ul style="margin:0;padding-left:19px;">${hourStatements || "<li>Kayıt yok.</li>"}</ul></section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">İade nedenleri</h3>${barRows(summary.byReason, "")}</section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">İade tarihine göre</h3>${barRows(summary.byReturnDate, "")}</section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">Order/Uygulama giriş tarihine göre</h3><p style="margin:0 0 7px;color:#64748b;font-size:11px;">Hangi tarihteki order kayıtlarının seçilen dönemde iade edildiğini gösterir.</p>${barRows(summary.byOrderDate, "")}</section></div>`;
+    return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(390px,1fr));gap:14px;"><section style="grid-column:1/-1;border:2px solid #93c5fd;border-radius:10px;padding:12px;"><h3 style="margin:0 0 3px;">FONET listesindeki tüm iade edilen ilaçlar</h3><p style="margin:0 0 7px;color:#2563eb;font-size:11px;font-weight:700;">Liste kısıtlanmaz. Hangi hastalardan kaç adet iade edildiğini görmek için ilaç adına tıklayın.</p>${drugBarRows(summary.byDrug)}</section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">En çok iade yapan personel</h3>${countBarRows(summary.byPerson)}</section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">Order saatine göre iade</h3><ul style="margin:0;padding-left:19px;">${hourStatements || "<li>Kayıt yok.</li>"}</ul></section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">İade nedenleri</h3>${barRows(summary.byReason, "")}</section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">İade tarihine göre</h3>${barRows(summary.byReturnDate, "")}</section><section style="border:1px solid #cbd5e1;border-radius:10px;padding:12px;"><h3 style="margin:0 0 8px;">Order/Uygulama giriş tarihine göre</h3><p style="margin:0 0 7px;color:#64748b;font-size:11px;">Hangi tarihteki order kayıtlarının seçilen dönemde iade edildiğini gösterir.</p>${barRows(summary.byOrderDate, "")}</section></div>`;
   }
 
   function render() {
@@ -668,6 +744,12 @@
 
   const state = {
     sourceContext: null,
+    sourceStore: null,
+    sourceGrid: null,
+    sourceTotalCount: 0,
+    sourceLoadedCount: 0,
+    sourcePageSize: 0,
+    sourceCurrentPage: 1,
     patients: [],
     rows: [],
     errors: [],
@@ -675,7 +757,7 @@
     endInput: yesterdayInput(),
     search: "",
     selectedDrug: "",
-    view: "patient",
+    view: "analysis",
     running: false,
     cancelRequested: false,
     controller: null,
@@ -689,6 +771,7 @@
     show() { const panel = document.getElementById(PANEL_ID); if (panel) panel.style.display = "block"; },
     destroy() { state.controller?.abort(); document.getElementById(PANEL_ID)?.remove(); delete window[APP_KEY]; },
     collectPatients,
+    collectAllListedPatients,
     run: runReport,
     _test: { parseDate, normalizeReturn, aggregateReturns, summarize, serviceDate, responseRows, orderHourKey, hourNarrative, analysisHtml, drugDetailHtml }
   };
@@ -696,7 +779,7 @@
   makePanel();
   try {
     collectPatients();
-    state.message = `${state.patients.length} hasta bulundu. Varsayılan olarak dünkü iadeler sorgulanacak.`;
+    state.message = `FONET listesinde ${state.sourceTotalCount || state.patients.length} hasta bulundu${state.sourceTotalCount > state.sourceLoadedCount ? `; ${state.sourceLoadedCount} kayıt şu an yüklü, çalıştırınca tüm sayfalar okunacak` : ""}. Varsayılan olarak dünkü iadeler sorgulanacak.`;
     render();
   } catch (error) {
     state.message = clean(error.message);
