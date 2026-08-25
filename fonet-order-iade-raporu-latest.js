@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
   const PANEL_ID = "fonet-order-iade-raporu";
-  const VERSION = "1.2.0";
+  const VERSION = "1.3.0";
   const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
 
   const clean = (value) => String(value == null ? "" : value)
@@ -294,8 +294,43 @@
   }
 
   function responseRows(payload) {
-    const choices = [payload?.data?.data, payload?.data, payload?.jsonArray?.data, payload?.rows, payload];
-    return choices.find(Array.isArray) || [];
+    const directChoices = [
+      payload?.data?.data,
+      payload?.data?.rows,
+      payload?.data?.content,
+      payload?.data?.list,
+      payload?.data,
+      payload?.jsonArray?.data?.data,
+      payload?.jsonArray?.data?.rows,
+      payload?.jsonArray?.data,
+      payload?.jsonArray,
+      payload?.rows,
+      payload?.content,
+      payload?.list,
+      payload?.result?.data,
+      payload?.result?.rows,
+      payload?.result,
+      payload
+    ];
+    const direct = directChoices.find(Array.isArray);
+    if (direct) return direct;
+
+    // FONET sürümleri aynı listeyi farklı zarflar içinde döndürebiliyor.
+    // Sadece bilinen liste anahtarlarında sınırlı derinlikte arama yap.
+    const queue = [{ value: payload, depth: 0 }];
+    const seen = new Set();
+    const listKeys = ["data", "rows", "content", "list", "result", "jsonArray", "items", "records"];
+    while (queue.length) {
+      const { value, depth } = queue.shift();
+      if (!value || typeof value !== "object" || seen.has(value) || depth > 4) continue;
+      seen.add(value);
+      for (const key of listKeys) {
+        const child = value[key];
+        if (Array.isArray(child)) return child;
+        if (child && typeof child === "object") queue.push({ value: child, depth: depth + 1 });
+      }
+    }
+    return [];
   }
 
   function enumLabel(typeKey, typeName, value) {
@@ -368,11 +403,6 @@
   async function fetchPatientReturns(patient, startInput, endInput, signal) {
     const patientFilter =
       { index: 1, property: "eorderPlan.eorder.birimSevk.id", value: Number(patient.birimSevkId) || patient.birimSevkId, type: "Long", operator: "=", filterType: "kriterPanel" };
-    const filters = [
-      patientFilter,
-      { index: 2, property: "orderIadeTarih", value: serviceDate(startInput, false), type: "date", operator: ">=", filterType: "kriterPanel" },
-      { index: 3, property: "orderIadeTarih", value: serviceDate(endInput, true), type: "date", operator: "<=", filterType: "kriterPanel" }
-    ];
     const request = (requestFilters) => apiGet(ENDPOINT, {
         autoStores: JSON.stringify(["orderIade", "orderIadeNeden", "uygulamaDurumu", "stokTuru"]),
         filterMap: "",
@@ -381,16 +411,10 @@
         start: "0",
         limit: "10000"
       }, signal);
-    let payload;
-    try {
-      payload = await request(filters);
-    } catch (error) {
-      if (error?.name === "AbortError") throw error;
-      // Bazı FONET kurulumları iade tarihi alanını sunucu filtresinde kabul etmiyor.
-      // Bu durumda yalnızca aynı hastanın kayıtları okunur ve tarih yerelde süzülür.
-      payload = await request([patientFilter]);
-      state.fallbackCount += 1;
-    }
+    // orderIadeTarih sunucu filtresi FONET sürümleri arasında tutarlı değil:
+    // bazı kurulumlar hata, bazıları da yanlışlıkla boş liste döndürüyor.
+    // Doğruluk için hastanın iadelerini al ve seçilen tarihi aşağıda yerelde süz.
+    const payload = await request([patientFilter]);
     const bounds = rangeBounds(startInput, endInput);
     return responseRows(payload)
       .map((row) => normalizeReturn(row, patient))
@@ -552,7 +576,7 @@
       state.message = `FONET listesindeki ${state.patients.length} hastanın tüm iadeleri birlikte okunuyor...`;
       render();
       let completed = 0;
-      await runPool(state.patients, 4, async (patient) => {
+      await runPool(state.patients, 2, async (patient) => {
         try {
           state.rows.push(...await fetchPatientReturns(patient, startInput, endInput, state.controller.signal));
         } catch (error) {
@@ -568,7 +592,7 @@
       const summary = summarize(state.rows);
       state.message = state.cancelRequested
         ? `Sorgu durduruldu. Okunan ${rawCount} iade kaydı, ${state.rows.length} birleşik satırda gösteriliyor.`
-        : `Tamamlandı: FONET listesindeki ${state.patients.length} hasta tarandı · ${summary.lines} iade kaydı · ${summary.displayLines} birleşik satır · İadesi olan ${summary.patientCount} hasta · Hatalı sorgu ${state.errors.length}${state.fallbackCount ? ` · Yerel tarih süzme ${state.fallbackCount} hasta` : ""}`;
+        : `Tamamlandı: FONET listesindeki ${state.patients.length} hasta tarandı · ${summary.lines} iade kaydı · ${summary.displayLines} birleşik satır · İadesi olan ${summary.patientCount} hasta · Hatalı sorgu ${state.errors.length} · Tarih aralığı güvenli biçimde yerelde süzüldü`;
     } finally {
       state.running = false;
       state.controller = null;
