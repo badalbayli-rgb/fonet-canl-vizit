@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
   const PANEL_ID = "fonet-order-iade-raporu";
-  const VERSION = "2.3.1";
+  const VERSION = "2.4.0";
   const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
   const ORDER_ENDPOINT = "/Stok/EOrder/getKayitList";
 
@@ -286,7 +286,7 @@
       if (!unique.has(birimSevkId)) unique.set(birimSevkId, {
         index, birimSevkId, adSoyad, oda: [oda, yatak].filter(Boolean).join("/") || "-",
         transferUnit: transfer.unit, transferTimeRaw: transfer.timeRaw, transferTimeText: transfer.timeText,
-        admissionTimeRaw: admission.raw, admissionTimeText: admission.text, raw: data
+        admissionTimeRaw: admission.raw, admissionTimeText: admission.text, recordRef: record, raw: data
       });
     });
     if (!unique.size) throw new Error("Hasta listesinden birim/sevk bilgisi okunamadı.");
@@ -364,6 +364,66 @@
     state.patients = patientsFromRecords(allRecords);
     state.sourceLoadedCount = state.patients.length;
     return state.patients;
+  }
+
+  function elementVisible(element) {
+    try {
+      const rect = element?.getBoundingClientRect?.();
+      const style = element?.ownerDocument?.defaultView?.getComputedStyle?.(element);
+      return Boolean(rect && rect.width > 0 && rect.height > 0 && style?.display !== "none" && style?.visibility !== "hidden");
+    } catch (_) { return false; }
+  }
+
+  function readVisibleAdmissionDateTime() {
+    for (const context of allContexts()) {
+      try {
+        const elements = [...context.document.querySelectorAll("label,span,div,td")]
+          .filter((element) => elementVisible(element) && /^(yatış|yatis) tarihi\s*:?$/i.test(clean(element.textContent)));
+        for (const label of elements.sort((a, b) => a.children.length - b.children.length)) {
+          const labelRect = label.getBoundingClientRect();
+          const fields = [...context.document.querySelectorAll("input")].filter((input) => {
+            if (!elementVisible(input)) return false;
+            const rect = input.getBoundingClientRect();
+            const sameLine = Math.abs((rect.top + rect.height / 2) - (labelRect.top + labelRect.height / 2)) <= 14;
+            return sameLine && rect.left >= labelRect.right - 8 && rect.left <= labelRect.right + 360;
+          }).sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+          const values = fields.map((field) => clean(field.value)).filter(Boolean);
+          const date = values.find((value) => /^\d{1,2}[.\/-]\d{1,2}[.\/-]\d{4}/.test(value)) || "";
+          const time = values.find((value) => /^\d{1,2}:\d{2}/.test(value)) || "";
+          if (date) return { raw: clean(`${date} ${time}`), text: displayRawDateTime(clean(`${date} ${time}`)) };
+        }
+      } catch (_) {}
+    }
+    return { raw: "", text: "-" };
+  }
+
+  async function collectAdmissionTimesFromVisibleForm() {
+    const grid = state.sourceGrid;
+    const selectionModel = grid?.getSelectionModel?.();
+    if (!selectionModel?.select) return;
+    let originalSelection = [];
+    try { originalSelection = selectionModel.getSelection?.() || []; } catch (_) {}
+    for (let index = 0; index < state.patients.length; index += 1) {
+      if (state.cancelRequested) break;
+      const patient = state.patients[index];
+      if (!patient.recordRef) continue;
+      state.message = `Yatış tarihleri FONET ekranından okunuyor: ${index + 1}/${state.patients.length} · ${patient.adSoyad}`;
+      updateStatus();
+      try {
+        selectionModel.select(patient.recordRef, false, false);
+        await new Promise((resolve) => setTimeout(resolve, 90));
+        let admission = readVisibleAdmissionDateTime();
+        if (!admission.raw) {
+          await new Promise((resolve) => setTimeout(resolve, 160));
+          admission = readVisibleAdmissionDateTime();
+        }
+        if (admission.raw) {
+          patient.admissionTimeRaw = admission.raw;
+          patient.admissionTimeText = admission.text;
+        }
+      } catch (_) {}
+    }
+    try { if (originalSelection.length) selectionModel.select(originalSelection, false, false); } catch (_) {}
   }
 
   function apiOrigin() {
@@ -845,6 +905,7 @@
         const examples = state.unreadablePatients.slice(0, 5).map((item) => `${item.index}. satır ${item.adSoyad}`).join(", ");
         throw new Error(`FONET listesindeki ${state.sourceRowCount} satırın ${state.unreadablePatients.length} tanesinde birim/sevk kimliği okunamadı (${examples}). Eksik hastalar atlanmadı; yanlış rapor üretmemek için işlem durduruldu.`);
       }
+      await collectAdmissionTimesFromVisibleForm();
       state.message = `FONET listesi doğrulandı: ${state.sourceRowCount} satır · ${state.patients.length} benzersiz hasta/sevk · İadeler ve orderlar okunuyor...`;
       render();
       let completed = 0;
