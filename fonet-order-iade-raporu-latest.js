@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
   const PANEL_ID = "fonet-order-iade-raporu";
-  const VERSION = "1.3.0";
+  const VERSION = "1.3.1";
   const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
 
   const clean = (value) => String(value == null ? "" : value)
@@ -141,6 +141,15 @@
     const text = norm(columns.map((column) => `${clean(column.text)} ${clean(column.dataIndex)} ${clean(column.name)}`).join(" "));
     const keys = norm(records.slice(0, 3).map((record) => Object.keys(record?.data || record?.raw || {}).join(" ")).join(" "));
     let score = 0;
+    let visible = false;
+    try { visible = grid?.isVisible?.(true) === true; } catch (_) {}
+    try { visible = visible || grid?.getEl?.()?.isVisible?.(true) === true; } catch (_) {}
+    try {
+      const element = grid?.getEl?.()?.dom;
+      const rect = element?.getBoundingClientRect?.();
+      visible = visible || Boolean(rect && rect.width > 20 && rect.height > 20);
+    } catch (_) {}
+    score += visible ? 60 : -35;
     if (/adı soyadı|adi soyadi|adisoyadi/.test(text)) score += 18;
     if (/oda no|odano|yatak/.test(text)) score += 8;
     if (/doktor|personel/.test(text)) score += 4;
@@ -151,7 +160,7 @@
     const totalCount = Number(store?.getTotalCount?.() ?? store?.totalCount ?? records.length) || records.length;
     const pageSize = Number(store?.getPageSize?.() ?? store?.pageSize ?? records.length) || records.length || 1;
     const currentPage = Number(store?.currentPage) || 1;
-    return { score, records, store, totalCount, pageSize, currentPage };
+    return { score, visible, records, store, totalCount, pageSize, currentPage };
   }
 
   function findPatientGrid() {
@@ -401,8 +410,6 @@
   }
 
   async function fetchPatientReturns(patient, startInput, endInput, signal) {
-    const patientFilter =
-      { index: 1, property: "eorderPlan.eorder.birimSevk.id", value: Number(patient.birimSevkId) || patient.birimSevkId, type: "Long", operator: "=", filterType: "kriterPanel" };
     const request = (requestFilters) => apiGet(ENDPOINT, {
         autoStores: JSON.stringify(["orderIade", "orderIadeNeden", "uygulamaDurumu", "stokTuru"]),
         filterMap: "",
@@ -411,12 +418,32 @@
         start: "0",
         limit: "10000"
       }, signal);
-    // orderIadeTarih sunucu filtresi FONET sürümleri arasında tutarlı değil:
-    // bazı kurulumlar hata, bazıları da yanlışlıkla boş liste döndürüyor.
-    // Doğruluk için hastanın iadelerini al ve seçilen tarihi aşağıda yerelde süz.
-    const payload = await request([patientFilter]);
+    // Hem tarih hem de sevk alanının adı FONET sürümleri arasında değişebiliyor.
+    // Görünür hastanın sevk kimliğiyle bilinen alanları sırayla dene; tarihi yerelde süz.
+    const patientValue = Number(patient.birimSevkId) || patient.birimSevkId;
+    const patientProperties = [
+      "eorderPlan.eorder.birimSevk.id",
+      "eorderPlan.birimSevk.id",
+      "birimSevk.id"
+    ];
+    let payload = null;
+    let rows = [];
+    let lastError = null;
+    let successfulRequest = false;
+    for (const property of patientProperties) {
+      try {
+        payload = await request([{ index: 1, property, value: patientValue, type: "Long", operator: "=", filterType: "kriterPanel" }]);
+        successfulRequest = true;
+        rows = responseRows(payload);
+        if (rows.length) break;
+      } catch (error) {
+        if (error?.name === "AbortError") throw error;
+        lastError = error;
+      }
+    }
+    if (!successfulRequest && lastError) throw lastError;
     const bounds = rangeBounds(startInput, endInput);
-    return responseRows(payload)
+    return rows
       .map((row) => normalizeReturn(row, patient))
       .filter((row) => !row.rejected && withinRange(row.returnDate, bounds.start, bounds.end));
   }
