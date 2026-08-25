@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
   const PANEL_ID = "fonet-order-iade-raporu";
-  const VERSION = "1.5.0";
+  const VERSION = "1.5.1";
   const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
   const ORDER_ENDPOINT = "/Stok/EOrder/getKayitList";
 
@@ -469,9 +469,45 @@
       drugName: clean(namedText(stock) || firstValue(row, ["stokAdi", "malzemeAdi", "tedaviAdi", "ilacAdi"]) || "Order adı okunamadı"),
       stockCode: clean(firstValue(row, ["stok.kodu", "eorder.stok.kodu", "malzeme.kodu"])),
       orderDate: parseDate(firstValue(row, ["baslangicTarihi", "tarih", "istemTarihi", "eklemeTarihi"])),
-      orderingPerson: clean(firstValue(row, ["kullanici.kimlik.adiSoyadi", "ekleyenKullanici.kimlik.adiSoyadi", "personel.kimlik.adiSoyadi", "doktor.kimlik.adiSoyadi", "istemYapanPersonel.kimlik.adiSoyadi", "kayitKullanici.kimlik.adiSoyadi", "kullanici.adiSoyadi"]) || namedText(firstValue(row, ["kullanici.kimlik", "ekleyenKullanici.kimlik", "personel.kimlik", "doktor.kimlik"])) || "Belirtilmemiş"),
+      orderingPerson: orderPersonName(row),
       raw: row
     };
+  }
+
+  function orderPersonName(row) {
+    const direct = clean(firstValue(row, [
+      "e.personel.kimlik.adiSoyadi", "e.doktor.kimlik.adiSoyadi", "e.kullanici.kimlik.adiSoyadi",
+      "eorder.personel.kimlik.adiSoyadi", "eorder.doktor.kimlik.adiSoyadi", "eorder.kullanici.kimlik.adiSoyadi",
+      "personel.kimlik.adiSoyadi", "doktor.kimlik.adiSoyadi", "hekim.kimlik.adiSoyadi",
+      "istemYapanPersonel.kimlik.adiSoyadi", "istemYapanDoktor.kimlik.adiSoyadi", "isteyenDoktor.kimlik.adiSoyadi",
+      "orderPersonel.kimlik.adiSoyadi", "orderVerenPersonel.kimlik.adiSoyadi", "olusturanPersonel.kimlik.adiSoyadi",
+      "kullanici.kimlik.adiSoyadi", "ekleyenKullanici.kimlik.adiSoyadi", "kayitKullanici.kimlik.adiSoyadi",
+      "personel.adiSoyadi", "doktor.adiSoyadi", "hekim.adiSoyadi", "kullanici.adiSoyadi"
+    ]));
+    if (direct) return direct;
+    const candidates = [];
+    const seen = new Set();
+    function walk(value, path = "", depth = 0) {
+      if (!value || typeof value !== "object" || depth > 6 || seen.has(value)) return;
+      seen.add(value);
+      for (const [key, child] of Object.entries(value)) {
+        const childPath = `${path}.${key}`;
+        if (/(personel|doktor|hekim|istem.*yapan|isteyen|order.*veren|kullanici|ekleyen|olusturan)/i.test(childPath)) {
+          const name = clean(typeof child === "string" ? child : child?.kimlik?.adiSoyadi || child?.adiSoyadi || child?.adSoyad || child?.name);
+          if (name && !/^\d+$/.test(name)) {
+            let score = 1;
+            if (/(doktor|hekim|istem.*yapan|isteyen|order.*veren)/i.test(childPath)) score += 5;
+            if (/personel/i.test(childPath)) score += 3;
+            if (/kullanici|ekleyen|olusturan/i.test(childPath)) score += 2;
+            candidates.push({ name, score });
+          }
+        }
+        if (child && typeof child === "object") walk(child, childPath, depth + 1);
+      }
+    }
+    walk(row);
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0]?.name || "Belirtilmemiş";
   }
 
   async function fetchPatientOrders(patient, startInput, endInput, signal) {
@@ -593,16 +629,16 @@
       const orderKeys = new Set(personOrders.map((order) => clean(order.id || order.orderNo)).filter(Boolean));
       const personReturns = details.filter((row) => norm(row.orderingPerson || "Belirtilmemiş") === norm(name));
       const returnedOrders = [...orderKeys].filter((key) => returnedOrderKeys.has(key)).length;
-      const fallbackReturned = returnedOrders || new Set(personReturns.map((row) => clean(row.orderId || row.orderNo)).filter(Boolean)).size;
       return {
         name,
         orders: personOrders.length,
-        returnedOrders: fallbackReturned,
+        returnedOrders,
+        returnedMedicines: personReturns.length,
         returnLines: personReturns.length,
         returnQuantity: personReturns.reduce((sum, row) => sum + row.quantity, 0),
-        rate: personOrders.length ? (fallbackReturned / personOrders.length) * 100 : 0
+        rate: personOrders.length ? (personReturns.length / personOrders.length) * 100 : 0
       };
-    }).sort((a, b) => b.rate - a.rate || b.returnedOrders - a.returnedOrders || b.orders - a.orders || a.name.localeCompare(b.name, "tr"));
+    }).sort((a, b) => b.rate - a.rate || b.returnedMedicines - a.returnedMedicines || b.orders - a.orders || a.name.localeCompare(b.name, "tr"));
     return {
       lines: details.length,
       displayLines: rows.length,
@@ -611,7 +647,8 @@
       drugCount: new Set(rows.map((row) => norm(row.drugName))).size,
       totalOrders: orders.length,
       returnedOrders: returnedOrderKeys.size,
-      returnRate: orders.length ? (returnedOrderKeys.size / orders.length) * 100 : 0,
+      returnedMedicines: details.length,
+      returnRate: orders.length ? (details.length / orders.length) * 100 : 0,
       byDrug,
       byReason: countMap((row) => row.reason),
       byReturnDate: countMap((row) => displayDateKey(dateKey(row.returnDate))),
@@ -692,7 +729,16 @@
         if (key) orderById.set(key, order);
       });
       state.rows.forEach((row) => {
-        const matchedOrder = orderById.get(clean(row.orderId || row.orderNo));
+        let matchedOrder = orderById.get(clean(row.orderId || row.orderNo));
+        if (!matchedOrder) {
+          const candidates = state.orders.filter((order) => order.patientKey === row.patientKey && norm(order.stockCode || order.drugName) === norm(row.stockCode || row.drugName));
+          candidates.sort((a, b) => {
+            const aDistance = a.orderDate && row.returnDate ? Math.abs(row.returnDate - a.orderDate) : Number.MAX_SAFE_INTEGER;
+            const bDistance = b.orderDate && row.returnDate ? Math.abs(row.returnDate - b.orderDate) : Number.MAX_SAFE_INTEGER;
+            return aDistance - bDistance;
+          });
+          matchedOrder = candidates[0];
+        }
         if (!row.orderingPerson && matchedOrder) row.orderingPerson = matchedOrder.orderingPerson;
       });
       const rawCount = state.rows.length;
@@ -701,7 +747,7 @@
       const summary = summarize(state.rows);
       state.message = state.cancelRequested
         ? `Sorgu durduruldu. Okunan ${rawCount} iade kaydı, ${state.rows.length} birleşik satırda gösteriliyor.`
-        : `Tamamlandı: ${state.patients.length} hasta · ${summary.totalOrders} order · ${summary.lines} iade kaydı · İade/Order oranı %${quantityText(summary.returnRate)} · İade sorgu hatası ${state.errors.length} · Order sorgu hatası ${state.orderErrors.length}`;
+        : `Tamamlandı: ${state.patients.length} hasta · ${summary.totalOrders} order edilen ilaç · ${summary.returnedMedicines} iade edilen ilaç · İade/Order oranı %${quantityText(summary.returnRate)} · İade sorgu hatası ${state.errors.length} · Order sorgu hatası ${state.orderErrors.length}`;
     } finally {
       state.running = false;
       state.controller = null;
@@ -738,7 +784,7 @@
     const hours = hourNarrative(summary.byOrderHour).join("\n");
     const text = [
       `FONET Order İade Raporu (${state.startInput} – ${state.endInput})`,
-      `Toplam order: ${summary.totalOrders} | İade edilen order: ${summary.returnedOrders} | İade/Order oranı: %${quantityText(summary.returnRate)} | İade kaydı: ${summary.lines} | Toplam iade miktarı: ${quantityText(summary.quantity)} | Hasta: ${summary.patientCount}`,
+      `Toplam order edilen ilaç: ${summary.totalOrders} | Toplam iade edilen ilaç: ${summary.returnedMedicines} | İade edilen/Order edilen ilaç oranı: %${quantityText(summary.returnRate)} | Toplam iade miktarı: ${quantityText(summary.quantity)} | Hasta: ${summary.patientCount}`,
       summary.byDrug[0] ? `En çok iade edilen ilaç: ${summary.byDrug[0].name} — ${quantityText(summary.byDrug[0].quantity)}` : "İade kaydı yok.",
       summary.byPerson[0] ? `En çok iade yapan personel: ${summary.byPerson[0].name} — ${summary.byPerson[0].lines} iade kaydı, ${quantityText(summary.byPerson[0].quantity)} miktar` : "İade personeli bilgisi yok.",
       "",
@@ -785,7 +831,7 @@
 
   function orderPersonBarRows(items) {
     const maximum = Math.max(1, ...items.map((item) => item.rate));
-    return items.length ? `<div style="display:grid;grid-template-columns:28px minmax(170px,1fr) 75px 75px 90px 1.2fr;gap:7px;padding:6px 2px;background:#f1f5f9;font-size:10px;font-weight:900;"><span>#</span><span>Order eden</span><span>Order</span><span>İade</span><span>İade oranı</span><span>Dağılım</span></div>${items.map((item, index) => `<button type="button" class="foir-order-person-link" data-order-person-index="${index}" title="Kaç order girdiğini ve kaçının iade edildiğini göster" style="display:grid;grid-template-columns:28px minmax(170px,1fr) 75px 75px 90px 1.2fr;gap:7px;align-items:center;width:100%;padding:7px 2px;border:0!important;border-bottom:1px solid #e2e8f0!important;border-radius:0!important;background:#fff;text-align:left;"><b>${index + 1}</b><span style="color:#7c3aed;text-decoration:underline;font-weight:800;">${escapeHtml(item.name)}</span><b>${item.orders}</b><b>${item.returnedOrders}</b><b>%${quantityText(item.rate)}</b><span style="height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden;"><span style="display:block;height:100%;width:${Math.max(2, Math.round((item.rate / maximum) * 100))}%;background:#7c3aed;"></span></span></button>`).join("")}` : `<div style="padding:18px;color:#64748b;">Order kaydı yok.</div>`;
+    return items.length ? `<div style="display:grid;grid-template-columns:28px minmax(170px,1fr) 90px 90px 90px 1.2fr;gap:7px;padding:6px 2px;background:#f1f5f9;font-size:10px;font-weight:900;"><span>#</span><span>Order eden doktor</span><span>Order ilaç</span><span>İade ilaç</span><span>İade oranı</span><span>Dağılım</span></div>${items.map((item, index) => `<button type="button" class="foir-order-person-link" data-order-person-index="${index}" title="Kaç ilaç order ettiğini ve kaçının iade edildiğini göster" style="display:grid;grid-template-columns:28px minmax(170px,1fr) 90px 90px 90px 1.2fr;gap:7px;align-items:center;width:100%;padding:7px 2px;border:0!important;border-bottom:1px solid #e2e8f0!important;border-radius:0!important;background:#fff;text-align:left;"><b>${index + 1}</b><span style="color:#7c3aed;text-decoration:underline;font-weight:800;">${escapeHtml(item.name)}</span><b>${item.orders}</b><b>${item.returnedMedicines}</b><b>%${quantityText(item.rate)}</b><span style="height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden;"><span style="display:block;height:100%;width:${Math.max(2, Math.round((item.rate / maximum) * 100))}%;background:#7c3aed;"></span></span></button>`).join("")}` : `<div style="padding:18px;color:#64748b;">Order kaydı yok.</div>`;
   }
 
   function drugBarRows(items) {
@@ -859,9 +905,10 @@
         returnPeople: [...new Set(matched.map((row) => clean(row.returnPerson)).filter(Boolean))]
       };
     }).sort((a, b) => Number(b.returned) - Number(a.returned) || a.patientName.localeCompare(b.patientName, "tr") || (b.orderDate || 0) - (a.orderDate || 0));
-    const returnedCount = items.filter((item) => item.returned).length;
-    const rate = items.length ? (returnedCount / items.length) * 100 : 0;
-    return `<div id="foir-order-person-dialog" style="position:absolute;inset:54px 24px 24px;z-index:7;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.55);"><section style="width:min(1250px,98%);max-height:82vh;overflow:auto;background:#fff;border:2px solid #7c3aed;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.4);"><header style="position:sticky;top:0;z-index:1;display:flex;justify-content:space-between;gap:15px;align-items:center;padding:12px 14px;background:#ede9fe;border-bottom:1px solid #c4b5fd;"><div><b style="font-size:16px;">${escapeHtml(personName)}</b><div style="font-size:11px;color:#475569;">${items.length} order · ${returnedCount} iade edilen order · İade oranı %${quantityText(rate)}</div></div><button id="foir-order-person-close" type="button">Kapat</button></header><table style="border-collapse:collapse;width:100%;min-width:1100px;"><thead><tr><th>Hasta</th><th>Oda/Yatak</th><th>Order</th><th>Order zamanı</th><th>İade durumu</th><th>İade kaydı / miktarı</th><th>İade zamanı</th><th>İade eden</th></tr></thead><tbody>${items.map((item) => `<tr><td><b>${escapeHtml(item.patientName)}</b></td><td>${escapeHtml(item.room)}</td><td><b>${escapeHtml(item.drugName)}</b><br><small>${escapeHtml(item.stockCode || "-")}</small></td><td>${escapeHtml(formatDateTime(item.orderDate))}</td><td><b style="color:${item.returned ? "#dc2626" : "#15803d"};">${item.returned ? "İade edilmiş" : "İade yok"}</b></td><td>${item.returnRecords} kayıt · <b>${quantityText(item.returnQuantity)}</b></td><td>${escapeHtml(item.returnDates.join(" | ") || "-")}</td><td>${escapeHtml(item.returnPeople.join(", ") || "-")}</td></tr>`).join("")}</tbody></table></section></div>`;
+    const returnedMedicineCount = items.reduce((sum, item) => sum + item.returnRecords, 0);
+    const returnedOrderCount = items.filter((item) => item.returned).length;
+    const rate = items.length ? (returnedMedicineCount / items.length) * 100 : 0;
+    return `<div id="foir-order-person-dialog" style="position:absolute;inset:54px 24px 24px;z-index:7;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.55);"><section style="width:min(1250px,98%);max-height:82vh;overflow:auto;background:#fff;border:2px solid #7c3aed;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.4);"><header style="position:sticky;top:0;z-index:1;display:flex;justify-content:space-between;gap:15px;align-items:center;padding:12px 14px;background:#ede9fe;border-bottom:1px solid #c4b5fd;"><div><b style="font-size:16px;">${escapeHtml(personName)}</b><div style="font-size:11px;color:#475569;">${items.length} order edilen ilaç · ${returnedMedicineCount} iade edilen ilaç · İade/Order oranı %${quantityText(rate)} · ${returnedOrderCount} farklı orderda iade</div></div><button id="foir-order-person-close" type="button">Kapat</button></header><table style="border-collapse:collapse;width:100%;min-width:1100px;"><thead><tr><th>Hasta</th><th>Oda/Yatak</th><th>Order edilen ilaç</th><th>Order zamanı</th><th>İade durumu</th><th>İade edilen ilaç / miktar</th><th>İade zamanı</th><th>İade eden</th></tr></thead><tbody>${items.map((item) => `<tr><td><b>${escapeHtml(item.patientName)}</b></td><td>${escapeHtml(item.room)}</td><td><b>${escapeHtml(item.drugName)}</b><br><small>${escapeHtml(item.stockCode || "-")}</small></td><td>${escapeHtml(formatDateTime(item.orderDate))}</td><td><b style="color:${item.returned ? "#dc2626" : "#15803d"};">${item.returned ? "İade edilmiş" : "İade yok"}</b></td><td>${item.returnRecords} ilaç · <b>${quantityText(item.returnQuantity)}</b></td><td>${escapeHtml(item.returnDates.join(" | ") || "-")}</td><td>${escapeHtml(item.returnPeople.join(", ") || "-")}</td></tr>`).join("")}</tbody></table></section></div>`;
   }
 
   function patientReportHtml(rows) {
@@ -888,7 +935,7 @@
     const summary = summarize(rows);
     const errorHtml = state.errors.length ? `<details style="margin-top:8px;color:#991b1b;"><summary>${state.errors.length} hasta iade sorgusu yapılamadı</summary>${state.errors.map((item) => `<div>${escapeHtml(item.patient)}: ${escapeHtml(item.message)}</div>`).join("")}</details>` : "";
     const orderErrorHtml = state.orderErrors.length ? `<details style="margin-top:8px;color:#92400e;"><summary>${state.orderErrors.length} hasta order sorgusu yapılamadı</summary>${state.orderErrors.map((item) => `<div>${escapeHtml(item.patient)}: ${escapeHtml(item.message)}</div>`).join("")}</details>` : "";
-    panel.innerHTML = `<header style="display:flex;justify-content:space-between;gap:12px;padding:12px 14px;background:#0f172a;color:#fff;"><div><b>FONET Order İade Analiz Raporu v${VERSION}</b><div style="font-size:11px;color:#cbd5e1;margin-top:3px;">Salt okunur · Veriler yalnızca bu tarayıcıda işlenir</div></div><button id="foir-close" class="foir-danger">Kapat</button></header><div style="padding:10px 12px;background:#f8fafc;border-bottom:1px solid #cbd5e1;"><div style="display:flex;gap:7px;align-items:end;flex-wrap:wrap;"><label>Başlangıç<br><input id="foir-start" type="date" value="${escapeHtml(state.startInput)}"></label><label>Bitiş<br><input id="foir-end" type="date" value="${escapeHtml(state.endInput)}"></label><button id="foir-yesterday">Dün</button><button id="foir-seven">Son 7 Gün</button><button id="foir-run" class="foir-primary">İadeleri Getir ve Analiz Et</button><button id="foir-stop" class="foir-danger">Durdur</button><button id="foir-csv">CSV İndir</button><button id="foir-copy">Özeti Kopyala</button><button id="foir-print">Yazdır</button></div><div style="display:flex;gap:7px;align-items:center;margin-top:8px;flex-wrap:wrap;"><input id="foir-search" placeholder="Hasta, oda, ilaç, iade nedeni veya personel ara" value="${escapeHtml(state.search)}" style="min-width:320px;flex:1;"><button id="foir-patient-view" class="${state.view === "patient" ? "foir-active" : ""}">Hasta Bazlı</button><button id="foir-analysis-view" class="${state.view === "analysis" ? "foir-active" : ""}">Analiz</button></div><div id="foir-status" style="margin-top:7px;font-size:12px;color:#334155;">${escapeHtml(state.message)}</div>${errorHtml}${orderErrorHtml}</div><div id="foir-scroll" style="height:calc(88vh - 218px);overflow:auto;padding:12px;background:#fff;"><div style="display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px;">${metricCard("Toplam order", String(summary.totalOrders))}${metricCard("İade edilen order", String(summary.returnedOrders), `${summary.lines} iade kaydı`)}${metricCard("İade / Order oranı", `%${quantityText(summary.returnRate)}`)}${metricCard("Toplam iade miktarı", quantityText(summary.quantity))}${metricCard("İadesi olan hasta", String(summary.patientCount))}${metricCard("Farklı ilaç", String(summary.drugCount))}${metricCard("En çok iade yapan", summary.byPerson[0]?.name || "-", summary.byPerson[0] ? `${summary.byPerson[0].lines} kayıt · ${quantityText(summary.byPerson[0].quantity)} miktar` : "")}</div>${state.view === "analysis" ? analysisHtml(summary) : patientReportHtml(rows)}</div>${drugDetailHtml(rows, state.selectedDrug)}${personDetailHtml(rows, state.selectedPerson)}${orderPersonDetailHtml(rows, state.orders, state.selectedOrderPerson)}`;
+    panel.innerHTML = `<header style="display:flex;justify-content:space-between;gap:12px;padding:12px 14px;background:#0f172a;color:#fff;"><div><b>FONET Order İade Analiz Raporu v${VERSION}</b><div style="font-size:11px;color:#cbd5e1;margin-top:3px;">Salt okunur · Veriler yalnızca bu tarayıcıda işlenir</div></div><button id="foir-close" class="foir-danger">Kapat</button></header><div style="padding:10px 12px;background:#f8fafc;border-bottom:1px solid #cbd5e1;"><div style="display:flex;gap:7px;align-items:end;flex-wrap:wrap;"><label>Başlangıç<br><input id="foir-start" type="date" value="${escapeHtml(state.startInput)}"></label><label>Bitiş<br><input id="foir-end" type="date" value="${escapeHtml(state.endInput)}"></label><button id="foir-yesterday">Dün</button><button id="foir-seven">Son 7 Gün</button><button id="foir-run" class="foir-primary">İadeleri Getir ve Analiz Et</button><button id="foir-stop" class="foir-danger">Durdur</button><button id="foir-csv">CSV İndir</button><button id="foir-copy">Özeti Kopyala</button><button id="foir-print">Yazdır</button></div><div style="display:flex;gap:7px;align-items:center;margin-top:8px;flex-wrap:wrap;"><input id="foir-search" placeholder="Hasta, oda, ilaç, iade nedeni veya personel ara" value="${escapeHtml(state.search)}" style="min-width:320px;flex:1;"><button id="foir-patient-view" class="${state.view === "patient" ? "foir-active" : ""}">Hasta Bazlı</button><button id="foir-analysis-view" class="${state.view === "analysis" ? "foir-active" : ""}">Analiz</button></div><div id="foir-status" style="margin-top:7px;font-size:12px;color:#334155;">${escapeHtml(state.message)}</div>${errorHtml}${orderErrorHtml}</div><div id="foir-scroll" style="height:calc(88vh - 218px);overflow:auto;padding:12px;background:#fff;"><div style="display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px;">${metricCard("Toplam order edilen ilaç", String(summary.totalOrders))}${metricCard("Toplam iade edilen ilaç", String(summary.returnedMedicines), `${summary.displayLines} birleşik satır`)}${metricCard("İade edilen / Order edilen", `%${quantityText(summary.returnRate)}`, "ilaç sayısı oranı")}${metricCard("Toplam iade miktarı", quantityText(summary.quantity))}${metricCard("İadesi olan hasta", String(summary.patientCount))}${metricCard("Farklı ilaç", String(summary.drugCount))}${metricCard("En çok iade yapan", summary.byPerson[0]?.name || "-", summary.byPerson[0] ? `${summary.byPerson[0].lines} kayıt · ${quantityText(summary.byPerson[0].quantity)} miktar` : "")}</div>${state.view === "analysis" ? analysisHtml(summary) : patientReportHtml(rows)}</div>${drugDetailHtml(rows, state.selectedDrug)}${personDetailHtml(rows, state.selectedPerson)}${orderPersonDetailHtml(rows, state.orders, state.selectedOrderPerson)}`;
     panel.querySelectorAll("button,input").forEach((element) => Object.assign(element.style, { border: "1px solid #94a3b8", borderRadius: "7px", padding: "7px 9px", fontWeight: element.tagName === "BUTTON" ? "800" : "500" }));
     panel.querySelectorAll("button").forEach((button) => { button.style.cursor = "pointer"; });
     panel.querySelectorAll("th,td").forEach((cell) => Object.assign(cell.style, { borderBottom: "1px solid #e2e8f0", padding: "7px", textAlign: "left", verticalAlign: "top" }));
