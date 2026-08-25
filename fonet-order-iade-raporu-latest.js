@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
   const PANEL_ID = "fonet-order-iade-raporu";
-  const VERSION = "1.5.4";
+  const VERSION = "2.0.0";
   const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
   const ORDER_ENDPOINT = "/Stok/EOrder/getKayitList";
 
@@ -131,6 +131,32 @@
     return "";
   }
 
+  function deepRecordValues(record) {
+    const root = record?.data || record?.raw || record || {};
+    const values = [];
+    const seen = new Set();
+    function walk(value, path = "", depth = 0) {
+      if (!value || typeof value !== "object" || depth > 8 || seen.has(value)) return;
+      seen.add(value);
+      Object.entries(value).forEach(([key, child]) => {
+        const childPath = path ? `${path}.${key}` : key;
+        if (child == null || child === "") return;
+        if (typeof child === "object") walk(child, childPath, depth + 1);
+        else values.push({ path: norm(childPath).replace(/[^a-z0-9çğıöşü]/g, ""), value: child });
+      });
+    }
+    walk(root);
+    return values;
+  }
+
+  function deepPatientValue(record, patterns) {
+    const candidates = deepRecordValues(record)
+      .map((item) => ({ ...item, score: patterns.reduce((score, pattern, index) => pattern.test(item.path) ? Math.max(score, patterns.length - index) : score, 0) }))
+      .filter((item) => item.score > 0 && clean(item.value));
+    candidates.sort((a, b) => b.score - a.score || a.path.length - b.path.length);
+    return candidates[0]?.value || "";
+  }
+
   function gridColumns(grid) {
     try { return grid.getColumnManager?.().getColumns?.() || grid.headerCt?.getGridColumns?.() || grid.columns || []; } catch (_) { return []; }
   }
@@ -187,16 +213,29 @@
 
   function patientsFromRecords(records) {
     const unique = new Map();
+    const unreadable = [];
     records.forEach((record, index) => {
       const data = record?.data || record?.raw || record || {};
-      const birimSevkId = clean(recordValue(record, ["birimSevkId", "BIRIM_SEVK_ID", "hastaBirimSevkId", "klinik.birimSevk.id", "birimSevk.id", "id"]));
-      const adSoyad = clean(recordValue(record, ["adiSoyadi", "adSoyad", "hastaAdiSoyadi", "ADSOYAD", "hasta.adiSoyadi"]));
-      const oda = clean(recordValue(record, ["odaNo", "ODANO", "ODA_NO", "klinik.yatak.oda.odaNo"]));
-      const yatak = clean(recordValue(record, ["yatakNo", "YATAKNO", "YATAK_NO", "klinik.yatak.yatakNo"]));
-      if (!birimSevkId || !adSoyad) return;
+      const birimSevkId = clean(recordValue(record, [
+        "birimSevkId", "birimsevkid", "BIRIMSEVKID", "BIRIM_SEVK_ID", "hastaBirimSevkId", "HASTA_BIRIM_SEVK_ID",
+        "klinik.birimSevk.id", "hastaKlinik.birimSevk.id", "hasta.birimSevk.id", "birimSevk.id", "sevk.birimSevk.id"
+      ]) || deepPatientValue(record, [/birimsevkid$/, /hastabirimsevkid$/, /birimsevk.*id$/, /sevk.*birim.*id$/]));
+      const adSoyad = clean(recordValue(record, [
+        "adiSoyadi", "adiSoyadi1", "adSoyad", "hastaAdiSoyadi", "hastaAdSoyad", "ADSOYAD", "ADI_SOYADI",
+        "hasta.adiSoyadi", "hasta.adSoyad", "kimlik.adiSoyadi", "hasta.kimlik.adiSoyadi"
+      ]) || deepPatientValue(record, [/hasta.*adisoyadi$/, /hasta.*adsoyad$/, /kimlik.*adisoyadi$/, /adisoyadi$/, /adsoyad$/]));
+      const oda = clean(recordValue(record, ["odaNo", "ODANO", "ODA_NO", "klinik.yatak.oda.odaNo", "yatak.oda.odaNo"]) || deepPatientValue(record, [/odano$/]));
+      const yatak = clean(recordValue(record, ["yatakNo", "YATAKNO", "YATAK_NO", "klinik.yatak.yatakNo", "yatak.yatakNo"]) || deepPatientValue(record, [/yatakno$/]));
+      if (!birimSevkId || !adSoyad) {
+        unreadable.push({ index: index + 1, adSoyad: adSoyad || "Adı okunamadı", hasSevk: Boolean(birimSevkId) });
+        return;
+      }
       if (!unique.has(birimSevkId)) unique.set(birimSevkId, { index, birimSevkId, adSoyad, oda: [oda, yatak].filter(Boolean).join("/") || "-", raw: data });
     });
     if (!unique.size) throw new Error("Hasta listesinden birim/sevk bilgisi okunamadı.");
+    state.sourceRowCount = records.length;
+    state.unreadablePatients = unreadable;
+    state.duplicatePatientRows = Math.max(0, records.length - unreadable.length - unique.size);
     return [...unique.values()];
   }
 
@@ -515,11 +554,9 @@
     const filters = [
       { index: 1, property: "tarihTuru", value: "tarihAraligiIcinde", filterType: "kriterPanel", isEnum: false, type: "String", operator: "=" },
       { index: 2, property: "tarih", value: serviceDate(dayInput, false), filterType: "kriterPanel", type: "date", operator: "=" },
-      // Günle kesişen planları getir: başlangıç gün sonundan önce, bitiş gün
-      // başlangıcından sonra olmalı. Ters operatörler yalnızca aynı gün içinde
-      // başlayıp biten orderları döndürerek toplamı yapay biçimde küçültüyordu.
-      { index: 3, property: "e.baslangicTarihi", value: serviceDate(dayInput, true), filterType: "kriterPanel", type: "date", operator: "<=" },
-      { index: 4, property: "e.bitisTarihi", value: serviceDate(dayInput, false), filterType: "kriterPanel", type: "date", operator: ">=" },
+      // FONET'in çalışan E-Order ekranının kullandığı tek-gün sorgu biçimi.
+      { index: 3, property: "e.baslangicTarihi", value: serviceDate(dayInput, false), filterType: "kriterPanel", type: "date", operator: ">=" },
+      { index: 4, property: "e.bitisTarihi", value: serviceDate(dayInput, true), filterType: "kriterPanel", type: "date", operator: "<=" },
       { index: 5, property: "birimSevk.id", value: Number(patient.birimSevkId) || patient.birimSevkId, filterType: "kriterPanel", type: "Long", operator: "=" },
       { index: 6, property: "yeri", value: 2, filterType: "kriterPanel", isEnum: true, type: "tr.com.fonet.hbys.common.enums.EOrderYeri", operator: "=" },
       { index: 7, property: "hemsireOrder", value: "false", filterType: "kriterPanel", isEnum: false, type: "String", operator: "=" }
@@ -546,12 +583,13 @@
   }
 
   async function fetchPatientOrders(patient, startInput, endInput, signal) {
-    // FONET'in `tarih` filtresi tek bir referans gün gibi davranıyor. Aralığı tek
-    // istekte göndermek, özellikle "Son 7 Gün" seçiminde yalnızca ilk günün
-    // orderlarını döndürebiliyor. Her günü ayrı okuyup aynı orderı tekilleştir.
-    const dayResults = await Promise.all(inputDatesBetween(startInput, endInput).map((day) =>
-      fetchPatientOrdersForDay(patient, day, signal)
-    ));
+    // FONET istekleri aynı hasta için eşzamanlı çalıştırıldığında eksik liste
+    // döndürebiliyor. Günleri sıralı oku, sonra aynı orderı tekilleştir.
+    const dayResults = [];
+    for (const day of inputDatesBetween(startInput, endInput)) {
+      if (signal?.aborted) throw new DOMException("Durduruldu", "AbortError");
+      dayResults.push(await fetchPatientOrdersForDay(patient, day, signal));
+    }
     const unique = new Map();
     dayResults.flat().forEach((order) => {
       const stableKey = clean(order.id || order.orderNo) || [order.patientKey, norm(order.stockCode || order.drugName), order.orderDate?.getTime() || ""].join("|");
@@ -736,7 +774,11 @@
     state.controller = new AbortController();
     try {
       await collectAllListedPatients();
-      state.message = `Seçilen klinik listesi: ${state.sourceTotalCount || state.patients.length} hasta · İadeler okunuyor...`;
+      if (state.unreadablePatients.length) {
+        const examples = state.unreadablePatients.slice(0, 5).map((item) => `${item.index}. satır ${item.adSoyad}`).join(", ");
+        throw new Error(`FONET listesindeki ${state.sourceRowCount} satırın ${state.unreadablePatients.length} tanesinde birim/sevk kimliği okunamadı (${examples}). Eksik hastalar atlanmadı; yanlış rapor üretmemek için işlem durduruldu.`);
+      }
+      state.message = `FONET listesi doğrulandı: ${state.sourceRowCount} satır · ${state.patients.length} benzersiz hasta/sevk · İadeler ve orderlar okunuyor...`;
       render();
       let completed = 0;
       await runPool(state.patients, 2, async (patient) => {
@@ -777,7 +819,7 @@
       const summary = summarize(state.rows);
       state.message = state.cancelRequested
         ? `Sorgu durduruldu. Okunan ${rawCount} iade kaydı, ${state.rows.length} birleşik satırda gösteriliyor.`
-        : `Tamamlandı: ${state.patients.length} hasta · ${summary.totalOrders} order edilen ilaç · ${summary.returnedMedicines} iade edilen ilaç · İade/Order oranı %${quantityText(summary.returnRate)} · İade sorgu hatası ${state.errors.length} · Order sorgu hatası ${state.orderErrors.length}`;
+        : `Tamamlandı: ${state.sourceRowCount} liste satırı · ${state.patients.length} hasta/sevk tarandı · ${summary.totalOrders} order edilen ilaç · ${summary.returnedMedicines} iade edilen ilaç · İade/Order oranı %${quantityText(summary.returnRate)} · İade sorgu hatası ${state.errors.length} · Order sorgu hatası ${state.orderErrors.length}`;
     } finally {
       state.running = false;
       state.controller = null;
@@ -1024,6 +1066,9 @@
     sourcePageSize: 0,
     sourceCurrentPage: 1,
     sourceGridVisible: false,
+    sourceRowCount: 0,
+    unreadablePatients: [],
+    duplicatePatientRows: 0,
     patients: [],
     rows: [],
     orders: [],
@@ -1057,7 +1102,7 @@
   makePanel();
   try {
     collectPatients();
-    state.message = `FONET listesinde ${state.sourceTotalCount || state.patients.length} hasta bulundu${state.sourceTotalCount > state.sourceLoadedCount ? `; ${state.sourceLoadedCount} kayıt şu an yüklü, çalıştırınca tüm sayfalar okunacak` : ""}. Varsayılan olarak dünkü iadeler sorgulanacak.`;
+    state.message = `FONET listesinde ${state.sourceRowCount || state.sourceTotalCount || state.patients.length} satır bulundu · ${state.patients.length} hasta/sevk kimliği okundu${state.unreadablePatients.length ? ` · ${state.unreadablePatients.length} satır doğrulanamadı` : ""}${state.sourceTotalCount > state.sourceLoadedCount ? `; ${state.sourceLoadedCount} kayıt şu an yüklü, çalıştırınca tüm sayfalar okunacak` : ""}. Varsayılan olarak dünkü iadeler sorgulanacak.`;
     render();
   } catch (error) {
     state.message = clean(error.message);
