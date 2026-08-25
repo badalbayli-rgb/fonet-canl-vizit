@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
   const PANEL_ID = "fonet-order-iade-raporu";
-  const VERSION = "1.5.3";
+  const VERSION = "1.5.4";
   const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
   const ORDER_ENDPOINT = "/Stok/EOrder/getKayitList";
 
@@ -515,8 +515,11 @@
     const filters = [
       { index: 1, property: "tarihTuru", value: "tarihAraligiIcinde", filterType: "kriterPanel", isEnum: false, type: "String", operator: "=" },
       { index: 2, property: "tarih", value: serviceDate(dayInput, false), filterType: "kriterPanel", type: "date", operator: "=" },
-      { index: 3, property: "e.baslangicTarihi", value: serviceDate(dayInput, false), filterType: "kriterPanel", type: "date", operator: ">=" },
-      { index: 4, property: "e.bitisTarihi", value: serviceDate(dayInput, true), filterType: "kriterPanel", type: "date", operator: "<=" },
+      // Günle kesişen planları getir: başlangıç gün sonundan önce, bitiş gün
+      // başlangıcından sonra olmalı. Ters operatörler yalnızca aynı gün içinde
+      // başlayıp biten orderları döndürerek toplamı yapay biçimde küçültüyordu.
+      { index: 3, property: "e.baslangicTarihi", value: serviceDate(dayInput, true), filterType: "kriterPanel", type: "date", operator: "<=" },
+      { index: 4, property: "e.bitisTarihi", value: serviceDate(dayInput, false), filterType: "kriterPanel", type: "date", operator: ">=" },
       { index: 5, property: "birimSevk.id", value: Number(patient.birimSevkId) || patient.birimSevkId, filterType: "kriterPanel", type: "Long", operator: "=" },
       { index: 6, property: "yeri", value: 2, filterType: "kriterPanel", isEnum: true, type: "tr.com.fonet.hbys.common.enums.EOrderYeri", operator: "=" },
       { index: 7, property: "hemsireOrder", value: "false", filterType: "kriterPanel", isEnum: false, type: "String", operator: "=" }
