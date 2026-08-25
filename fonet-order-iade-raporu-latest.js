@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
   const PANEL_ID = "fonet-order-iade-raporu";
-  const VERSION = "1.5.1";
+  const VERSION = "1.5.3";
   const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
   const ORDER_ENDPOINT = "/Stok/EOrder/getKayitList";
 
@@ -403,6 +403,7 @@
       depot: clean(namedText(firstValue(row, ["eorderPlan.depo", "depo"]))),
       orderNo: clean(firstValue(row, ["orderNo", "eorderPlan.eorder.orderNo"])),
       orderId: clean(firstValue(row, ["eorderPlan.eorder.id", "eorder.id", "eorderId", "orderId"])),
+      matchedOrderKey: "",
       orderingPerson: clean(firstValue(row, ["eorderPlan.eorder.kullanici.kimlik.adiSoyadi", "eorderPlan.eorder.ekleyenKullanici.kimlik.adiSoyadi", "eorderPlan.eorder.personel.kimlik.adiSoyadi", "eorderPlan.eorder.doktor.kimlik.adiSoyadi", "orderKullanici.kimlik.adiSoyadi", "istemYapanPersonel.kimlik.adiSoyadi"]) || namedText(firstValue(row, ["eorderPlan.eorder.kullanici.kimlik", "eorderPlan.eorder.personel.kimlik", "eorderPlan.eorder.doktor.kimlik"]))),
       raw: row
     };
@@ -510,12 +511,12 @@
     return candidates[0]?.name || "Belirtilmemiş";
   }
 
-  async function fetchPatientOrders(patient, startInput, endInput, signal) {
+  async function fetchPatientOrdersForDay(patient, dayInput, signal) {
     const filters = [
       { index: 1, property: "tarihTuru", value: "tarihAraligiIcinde", filterType: "kriterPanel", isEnum: false, type: "String", operator: "=" },
-      { index: 2, property: "tarih", value: serviceDate(startInput, false), filterType: "kriterPanel", type: "date", operator: "=" },
-      { index: 3, property: "e.baslangicTarihi", value: serviceDate(startInput, false), filterType: "kriterPanel", type: "date", operator: ">=" },
-      { index: 4, property: "e.bitisTarihi", value: serviceDate(endInput, true), filterType: "kriterPanel", type: "date", operator: "<=" },
+      { index: 2, property: "tarih", value: serviceDate(dayInput, false), filterType: "kriterPanel", type: "date", operator: "=" },
+      { index: 3, property: "e.baslangicTarihi", value: serviceDate(dayInput, false), filterType: "kriterPanel", type: "date", operator: ">=" },
+      { index: 4, property: "e.bitisTarihi", value: serviceDate(dayInput, true), filterType: "kriterPanel", type: "date", operator: "<=" },
       { index: 5, property: "birimSevk.id", value: Number(patient.birimSevkId) || patient.birimSevkId, filterType: "kriterPanel", type: "Long", operator: "=" },
       { index: 6, property: "yeri", value: 2, filterType: "kriterPanel", isEnum: true, type: "tr.com.fonet.hbys.common.enums.EOrderYeri", operator: "=" },
       { index: 7, property: "hemsireOrder", value: "false", filterType: "kriterPanel", isEnum: false, type: "String", operator: "=" }
@@ -529,6 +530,31 @@
       limit: "10000"
     }, signal);
     return responseRows(payload).map((row) => normalizeOrder(row, patient));
+  }
+
+  function inputDatesBetween(startInput, endInput) {
+    const dates = [];
+    const start = parseDate(`${startInput}T12:00:00`);
+    const end = parseDate(`${endInput}T12:00:00`);
+    for (const cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
+      dates.push(localInputDate(cursor));
+    }
+    return dates;
+  }
+
+  async function fetchPatientOrders(patient, startInput, endInput, signal) {
+    // FONET'in `tarih` filtresi tek bir referans gün gibi davranıyor. Aralığı tek
+    // istekte göndermek, özellikle "Son 7 Gün" seçiminde yalnızca ilk günün
+    // orderlarını döndürebiliyor. Her günü ayrı okuyup aynı orderı tekilleştir.
+    const dayResults = await Promise.all(inputDatesBetween(startInput, endInput).map((day) =>
+      fetchPatientOrdersForDay(patient, day, signal)
+    ));
+    const unique = new Map();
+    dayResults.flat().forEach((order) => {
+      const stableKey = clean(order.id || order.orderNo) || [order.patientKey, norm(order.stockCode || order.drugName), order.orderDate?.getTime() || ""].join("|");
+      if (!unique.has(stableKey)) unique.set(stableKey, order);
+    });
+    return [...unique.values()];
   }
 
   async function runPool(items, limit, worker) {
@@ -624,7 +650,7 @@
     });
     const byPerson = countMap((row) => row.returnPerson || "Belirtilmemiş")
       .sort((a, b) => b.lines - a.lines || b.quantity - a.quantity || a.name.localeCompare(b.name, "tr"));
-    const returnedOrderKeys = new Set(details.map((row) => clean(row.orderId || row.orderNo)).filter(Boolean));
+    const returnedOrderKeys = new Set(details.map((row) => clean(row.matchedOrderKey || row.orderId || row.orderNo)).filter(Boolean));
     const byOrderingPerson = [...groupRows(orders, (order) => order.orderingPerson || "Belirtilmemiş")].map(([name, personOrders]) => {
       const orderKeys = new Set(personOrders.map((order) => clean(order.id || order.orderNo)).filter(Boolean));
       const personReturns = details.filter((row) => norm(row.orderingPerson || "Belirtilmemiş") === norm(name));
@@ -740,6 +766,7 @@
           matchedOrder = candidates[0];
         }
         if (!row.orderingPerson && matchedOrder) row.orderingPerson = matchedOrder.orderingPerson;
+        if (matchedOrder) row.matchedOrderKey = clean(matchedOrder.id || matchedOrder.orderNo);
       });
       const rawCount = state.rows.length;
       state.rows = aggregateReturns(state.rows);
@@ -888,7 +915,7 @@
     const returns = detailRows(rows);
     const returnsByOrder = new Map();
     returns.forEach((row) => {
-      const key = clean(row.orderId || row.orderNo);
+      const key = clean(row.matchedOrderKey || row.orderId || row.orderNo);
       if (!key) return;
       if (!returnsByOrder.has(key)) returnsByOrder.set(key, []);
       returnsByOrder.get(key).push(row);
@@ -904,11 +931,11 @@
         returnDates: [...new Set(matched.map((row) => formatDateTime(row.returnDate)))],
         returnPeople: [...new Set(matched.map((row) => clean(row.returnPerson)).filter(Boolean))]
       };
-    }).sort((a, b) => Number(b.returned) - Number(a.returned) || a.patientName.localeCompare(b.patientName, "tr") || (b.orderDate || 0) - (a.orderDate || 0));
+    }).filter((item) => item.returned).sort((a, b) => a.patientName.localeCompare(b.patientName, "tr") || (b.orderDate || 0) - (a.orderDate || 0));
     const returnedMedicineCount = items.reduce((sum, item) => sum + item.returnRecords, 0);
-    const returnedOrderCount = items.filter((item) => item.returned).length;
-    const rate = items.length ? (returnedMedicineCount / items.length) * 100 : 0;
-    return `<div id="foir-order-person-dialog" style="position:absolute;inset:54px 24px 24px;z-index:7;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.55);"><section style="width:min(1250px,98%);max-height:82vh;overflow:auto;background:#fff;border:2px solid #7c3aed;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.4);"><header style="position:sticky;top:0;z-index:1;display:flex;justify-content:space-between;gap:15px;align-items:center;padding:12px 14px;background:#ede9fe;border-bottom:1px solid #c4b5fd;"><div><b style="font-size:16px;">${escapeHtml(personName)}</b><div style="font-size:11px;color:#475569;">${items.length} order edilen ilaç · ${returnedMedicineCount} iade edilen ilaç · İade/Order oranı %${quantityText(rate)} · ${returnedOrderCount} farklı orderda iade</div></div><button id="foir-order-person-close" type="button">Kapat</button></header><table style="border-collapse:collapse;width:100%;min-width:1100px;"><thead><tr><th>Hasta</th><th>Oda/Yatak</th><th>Order edilen ilaç</th><th>Order zamanı</th><th>İade durumu</th><th>İade edilen ilaç / miktar</th><th>İade zamanı</th><th>İade eden</th></tr></thead><tbody>${items.map((item) => `<tr><td><b>${escapeHtml(item.patientName)}</b></td><td>${escapeHtml(item.room)}</td><td><b>${escapeHtml(item.drugName)}</b><br><small>${escapeHtml(item.stockCode || "-")}</small></td><td>${escapeHtml(formatDateTime(item.orderDate))}</td><td><b style="color:${item.returned ? "#dc2626" : "#15803d"};">${item.returned ? "İade edilmiş" : "İade yok"}</b></td><td>${item.returnRecords} ilaç · <b>${quantityText(item.returnQuantity)}</b></td><td>${escapeHtml(item.returnDates.join(" | ") || "-")}</td><td>${escapeHtml(item.returnPeople.join(", ") || "-")}</td></tr>`).join("")}</tbody></table></section></div>`;
+    const returnedOrderCount = items.length;
+    const rate = personOrders.length ? (returnedMedicineCount / personOrders.length) * 100 : 0;
+    return `<div id="foir-order-person-dialog" style="position:absolute;inset:54px 24px 24px;z-index:7;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.55);"><section style="width:min(1250px,98%);max-height:82vh;overflow:auto;background:#fff;border:2px solid #7c3aed;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.4);"><header style="position:sticky;top:0;z-index:1;display:flex;justify-content:space-between;gap:15px;align-items:center;padding:12px 14px;background:#ede9fe;border-bottom:1px solid #c4b5fd;"><div><b style="font-size:16px;">${escapeHtml(personName)}</b><div style="font-size:11px;color:#475569;">${personOrders.length} order edilen ilaç · ${returnedMedicineCount} iade edilen ilaç · İade/Order oranı %${quantityText(rate)} · ${returnedOrderCount} farklı orderda iade · Yalnızca iadeler gösteriliyor</div></div><button id="foir-order-person-close" type="button">Kapat</button></header><table style="border-collapse:collapse;width:100%;min-width:1100px;"><thead><tr><th>Hasta</th><th>Oda/Yatak</th><th>İade edilen ilaç</th><th>Order zamanı</th><th>İade edilen kayıt / miktar</th><th>İade zamanı</th><th>İade eden</th></tr></thead><tbody>${items.map((item) => `<tr><td><b>${escapeHtml(item.patientName)}</b></td><td>${escapeHtml(item.room)}</td><td><b>${escapeHtml(item.drugName)}</b><br><small>${escapeHtml(item.stockCode || "-")}</small></td><td>${escapeHtml(formatDateTime(item.orderDate))}</td><td>${item.returnRecords} ilaç · <b>${quantityText(item.returnQuantity)}</b></td><td>${escapeHtml(item.returnDates.join(" | ") || "-")}</td><td>${escapeHtml(item.returnPeople.join(", ") || "-")}</td></tr>`).join("")}</tbody></table></section></div>`;
   }
 
   function patientReportHtml(rows) {
