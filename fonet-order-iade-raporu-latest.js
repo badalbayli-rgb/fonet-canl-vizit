@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
   const PANEL_ID = "fonet-order-iade-raporu";
-  const VERSION = "1.3.1";
+  const VERSION = "1.3.2";
   const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
 
   const clean = (value) => String(value == null ? "" : value)
@@ -167,9 +167,14 @@
     const candidates = [];
     for (const context of allContexts()) {
       try {
+        const bodyText = clean(context.document?.body?.innerText || "");
+        const countHints = [...bodyText.matchAll(/(?:^|\s)Yatan\s*:\s*(\d+)/gi)]
+          .map((match) => Number(match[1]))
+          .filter((value) => Number.isFinite(value) && value >= 0);
         const grids = context.Ext?.ComponentQuery?.query?.("gridpanel, grid") || [];
         grids.forEach((grid) => {
           const result = patientGridScore(grid);
+          if (countHints.includes(result.totalCount) || countHints.includes(result.records.length)) result.score += 140;
           if (result.records.length) candidates.push({ context, grid, ...result });
         });
       } catch (_) {}
@@ -203,6 +208,7 @@
     state.sourcePageSize = candidate.pageSize;
     state.sourceCurrentPage = candidate.currentPage;
     state.sourceLoadedCount = candidate.records.length;
+    state.sourceGridVisible = Boolean(candidate.visible);
     state.patients = patientsFromRecords(candidate.records);
     return state.patients;
   }
@@ -600,7 +606,7 @@
     state.controller = new AbortController();
     try {
       await collectAllListedPatients();
-      state.message = `FONET listesindeki ${state.patients.length} hastanın tüm iadeleri birlikte okunuyor...`;
+      state.message = `Seçilen klinik listesi: ${state.sourceTotalCount || state.patients.length} hasta · İadeler okunuyor...`;
       render();
       let completed = 0;
       await runPool(state.patients, 2, async (patient) => {
@@ -801,6 +807,7 @@
     sourceLoadedCount: 0,
     sourcePageSize: 0,
     sourceCurrentPage: 1,
+    sourceGridVisible: false,
     patients: [],
     rows: [],
     errors: [],
