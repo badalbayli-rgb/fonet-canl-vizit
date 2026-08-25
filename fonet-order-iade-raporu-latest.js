@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
   const PANEL_ID = "fonet-order-iade-raporu";
-  const VERSION = "2.3.0";
+  const VERSION = "2.3.1";
   const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
   const ORDER_ENDPOINT = "/Stok/EOrder/getKayitList";
 
@@ -187,16 +187,24 @@
   }
 
   function admissionInfoFromRecord(record) {
-    const raw = clean(recordValue(record, [
+    const dateRaw = clean(recordValue(record, [
       "yatisTarihi", "yatışTarihi", "YATIS_TARIHI", "yatisTarih", "klinikYatisTarihi", "servisYatisTarihi",
       "kabulTarihi", "KABUL_TARIHI", "yatisaKabulTarihi", "yatisBaslangicTarihi", "birimSevk.tarih", "birimSevk.baslangicTarihi",
       "klinik.birimSevk.tarih", "klinik.birimSevk.baslangicTarihi", "hastaKlinik.yatisTarihi",
       "eorderPlan.eorder.birimSevk.yatisTarihi", "eorderPlan.eorder.birimSevk.tarih", "eorderPlan.eorder.birimSevk.baslangicTarihi",
-      "eorderPlan.birimSevk.yatisTarihi", "eorderPlan.birimSevk.tarih"
+      "eorderPlan.birimSevk.yatisTarihi", "eorderPlan.birimSevk.tarih",
+      "sevkTarihi", "sevkTarih", "SEVK_TARIHI", "birimSevk.sevkTarihi", "klinik.sevkTarihi"
     ]) || deepPatientValue(record, [
       /klinik.*yatistarih$/, /servis.*yatistarih$/, /yatiskabultarih$/, /yatisbaslangictarih$/, /yatistarih$/,
-      /birimsevk.*baslangictarih$/, /birimsevk.*kabultarih$/, /birimsevk.*tarih$/, /kabultarih$/
+      /birimsevk.*baslangictarih$/, /birimsevk.*kabultarih$/, /birimsevk.*tarih$/, /kabultarih$/, /sevktarih$/
     ]));
+    const timeRaw = clean(recordValue(record, [
+      "yatisSaati", "yatışSaati", "YATIS_SAATI", "yatisSaat", "klinikYatisSaati", "servisYatisSaati",
+      "kabulSaati", "KABUL_SAATI", "birimSevk.yatisSaati", "klinik.birimSevk.yatisSaati",
+      "sevkSaati", "sevkSaat", "SEVK_SAATI", "birimSevk.sevkSaati", "klinik.sevkSaati"
+    ]) || deepPatientValue(record, [/yatissaat$/, /yatissaati$/, /kabulsaati$/, /sevksaati$/]));
+    const dateHasTime = /\d{1,2}:\d{2}/.test(dateRaw);
+    const raw = clean([dateRaw, !dateHasTime ? timeRaw : ""].filter(Boolean).join(" "));
     return { raw, text: displayRawDateTime(raw) };
   }
 
