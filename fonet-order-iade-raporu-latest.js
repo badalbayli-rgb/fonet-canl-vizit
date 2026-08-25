@@ -3,7 +3,7 @@
 
   const APP_KEY = "__FONET_ORDER_RETURN_REPORT__";
   const PANEL_ID = "fonet-order-iade-raporu";
-  const VERSION = "2.0.0";
+  const VERSION = "2.1.0";
   const ENDPOINT = "/Stok/EOrderHastaIade/getEOrderHastaIadeList";
   const ORDER_ENDPOINT = "/Stok/EOrder/getKayitList";
 
@@ -746,14 +746,14 @@
   }
 
   function updateStatus() {
-    const element = document.getElementById("foir-status");
+    const element = uiDocument()?.getElementById("foir-status");
     if (element) element.textContent = state.message;
   }
 
   async function runReport() {
     if (state.running) return;
-    const startInput = clean(document.getElementById("foir-start")?.value || state.startInput);
-    const endInput = clean(document.getElementById("foir-end")?.value || state.endInput);
+    const startInput = clean(uiDocument()?.getElementById("foir-start")?.value || state.startInput);
+    const endInput = clean(uiDocument()?.getElementById("foir-end")?.value || state.endInput);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(startInput) || !/^\d{4}-\d{2}-\d{2}$/.test(endInput) || startInput > endInput) {
       alert("Geçerli bir başlangıç ve bitiş tarihi seçin.");
       return;
@@ -839,10 +839,11 @@
     const lines = [header, ...rows.map((row) => [row.patientName, row.room, row.drugName, row.stockCode, row.recordCount || 1, quantityText(row.quantity), orderDatesText(row), formatDateTime(row.returnDate), row.reason, row.status, row.explanation, row.returnPerson, row.orderNo])];
     const blob = new Blob(["\uFEFF", lines.map((line) => line.map(csvCell).join(";")).join("\r\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
+    const doc = uiDocument() || document;
+    const anchor = doc.createElement("a");
     anchor.href = url;
     anchor.download = `fonet-order-iade-${state.startInput}-${state.endInput}.csv`;
-    document.body.appendChild(anchor);
+    doc.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -999,7 +1000,7 @@
   }
 
   function render() {
-    const panel = document.getElementById(PANEL_ID);
+    const panel = uiDocument()?.getElementById(PANEL_ID);
     if (!panel) return;
     const oldScroller = panel.querySelector("#foir-scroll");
     const scrollTop = Number(oldScroller?.scrollTop) || 0;
@@ -1007,7 +1008,7 @@
     const summary = summarize(rows);
     const errorHtml = state.errors.length ? `<details style="margin-top:8px;color:#991b1b;"><summary>${state.errors.length} hasta iade sorgusu yapılamadı</summary>${state.errors.map((item) => `<div>${escapeHtml(item.patient)}: ${escapeHtml(item.message)}</div>`).join("")}</details>` : "";
     const orderErrorHtml = state.orderErrors.length ? `<details style="margin-top:8px;color:#92400e;"><summary>${state.orderErrors.length} hasta order sorgusu yapılamadı</summary>${state.orderErrors.map((item) => `<div>${escapeHtml(item.patient)}: ${escapeHtml(item.message)}</div>`).join("")}</details>` : "";
-    panel.innerHTML = `<header style="display:flex;justify-content:space-between;gap:12px;padding:12px 14px;background:#0f172a;color:#fff;"><div><b>FONET Order İade Analiz Raporu v${VERSION}</b><div style="font-size:11px;color:#cbd5e1;margin-top:3px;">Salt okunur · Veriler yalnızca bu tarayıcıda işlenir</div></div><button id="foir-close" class="foir-danger">Kapat</button></header><div style="padding:10px 12px;background:#f8fafc;border-bottom:1px solid #cbd5e1;"><div style="display:flex;gap:7px;align-items:end;flex-wrap:wrap;"><label>Başlangıç<br><input id="foir-start" type="date" value="${escapeHtml(state.startInput)}"></label><label>Bitiş<br><input id="foir-end" type="date" value="${escapeHtml(state.endInput)}"></label><button id="foir-yesterday">Dün</button><button id="foir-seven">Son 7 Gün</button><button id="foir-run" class="foir-primary">İadeleri Getir ve Analiz Et</button><button id="foir-stop" class="foir-danger">Durdur</button><button id="foir-csv">CSV İndir</button><button id="foir-copy">Özeti Kopyala</button><button id="foir-print">Yazdır</button></div><div style="display:flex;gap:7px;align-items:center;margin-top:8px;flex-wrap:wrap;"><input id="foir-search" placeholder="Hasta, oda, ilaç, iade nedeni veya personel ara" value="${escapeHtml(state.search)}" style="min-width:320px;flex:1;"><button id="foir-patient-view" class="${state.view === "patient" ? "foir-active" : ""}">Hasta Bazlı</button><button id="foir-analysis-view" class="${state.view === "analysis" ? "foir-active" : ""}">Analiz</button></div><div id="foir-status" style="margin-top:7px;font-size:12px;color:#334155;">${escapeHtml(state.message)}</div>${errorHtml}${orderErrorHtml}</div><div id="foir-scroll" style="height:calc(88vh - 218px);overflow:auto;padding:12px;background:#fff;"><div style="display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px;">${metricCard("Toplam order edilen ilaç", String(summary.totalOrders))}${metricCard("Toplam iade edilen ilaç", String(summary.returnedMedicines), `${summary.displayLines} birleşik satır`)}${metricCard("İade edilen / Order edilen", `%${quantityText(summary.returnRate)}`, "ilaç sayısı oranı")}${metricCard("Toplam iade miktarı", quantityText(summary.quantity))}${metricCard("İadesi olan hasta", String(summary.patientCount))}${metricCard("Farklı ilaç", String(summary.drugCount))}${metricCard("En çok iade yapan", summary.byPerson[0]?.name || "-", summary.byPerson[0] ? `${summary.byPerson[0].lines} kayıt · ${quantityText(summary.byPerson[0].quantity)} miktar` : "")}</div>${state.view === "analysis" ? analysisHtml(summary) : patientReportHtml(rows)}</div>${drugDetailHtml(rows, state.selectedDrug)}${personDetailHtml(rows, state.selectedPerson)}${orderPersonDetailHtml(rows, state.orders, state.selectedOrderPerson)}`;
+    panel.innerHTML = `<header style="display:flex;justify-content:space-between;gap:12px;padding:12px 14px;background:#0f172a;color:#fff;"><div><b>FONET Order İade Analiz Raporu v${VERSION}</b><div style="font-size:11px;color:#cbd5e1;margin-top:3px;">Ayrı pencere · Salt okunur · Veriler yalnızca bu tarayıcıda işlenir</div></div><button id="foir-close" class="foir-danger">Pencereyi Kapat</button></header><div style="padding:10px 12px;background:#f8fafc;border-bottom:1px solid #cbd5e1;"><div style="display:flex;gap:7px;align-items:end;flex-wrap:wrap;"><label>Başlangıç<br><input id="foir-start" type="date" value="${escapeHtml(state.startInput)}"></label><label>Bitiş<br><input id="foir-end" type="date" value="${escapeHtml(state.endInput)}"></label><button id="foir-yesterday">Dün</button><button id="foir-seven">Son 7 Gün</button><button id="foir-run" class="foir-primary">İadeleri Getir ve Analiz Et</button><button id="foir-stop" class="foir-danger">Durdur</button><button id="foir-csv">CSV İndir</button><button id="foir-copy">Özeti Kopyala</button><button id="foir-print">Yazdır</button></div><div style="display:flex;gap:7px;align-items:center;margin-top:8px;flex-wrap:wrap;"><input id="foir-search" placeholder="Hasta, oda, ilaç, iade nedeni veya personel ara" value="${escapeHtml(state.search)}" style="min-width:320px;flex:1;"><button id="foir-patient-view" class="${state.view === "patient" ? "foir-active" : ""}">Hasta Bazlı</button><button id="foir-analysis-view" class="${state.view === "analysis" ? "foir-active" : ""}">Analiz</button></div><div id="foir-status" style="margin-top:7px;font-size:12px;color:#334155;">${escapeHtml(state.message)}</div>${errorHtml}${orderErrorHtml}</div><div id="foir-scroll" style="height:calc(100vh - 218px);overflow:auto;padding:12px;background:#fff;"><div style="display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px;">${metricCard("Toplam order edilen ilaç", String(summary.totalOrders))}${metricCard("Toplam iade edilen ilaç", String(summary.returnedMedicines), `${summary.displayLines} birleşik satır`)}${metricCard("İade edilen / Order edilen", `%${quantityText(summary.returnRate)}`, "ilaç sayısı oranı")}${metricCard("Toplam iade miktarı", quantityText(summary.quantity))}${metricCard("İadesi olan hasta", String(summary.patientCount))}${metricCard("Farklı ilaç", String(summary.drugCount))}${metricCard("En çok iade yapan", summary.byPerson[0]?.name || "-", summary.byPerson[0] ? `${summary.byPerson[0].lines} kayıt · ${quantityText(summary.byPerson[0].quantity)} miktar` : "")}</div>${state.view === "analysis" ? analysisHtml(summary) : patientReportHtml(rows)}</div>${drugDetailHtml(rows, state.selectedDrug)}${personDetailHtml(rows, state.selectedPerson)}${orderPersonDetailHtml(rows, state.orders, state.selectedOrderPerson)}`;
     panel.querySelectorAll("button,input").forEach((element) => Object.assign(element.style, { border: "1px solid #94a3b8", borderRadius: "7px", padding: "7px 9px", fontWeight: element.tagName === "BUTTON" ? "800" : "500" }));
     panel.querySelectorAll("button").forEach((button) => { button.style.cursor = "pointer"; });
     panel.querySelectorAll("th,td").forEach((cell) => Object.assign(cell.style, { borderBottom: "1px solid #e2e8f0", padding: "7px", textAlign: "left", verticalAlign: "top" }));
@@ -1017,7 +1018,7 @@
     panel.querySelectorAll(".foir-active").forEach((button) => { button.style.background = "#0f766e"; button.style.color = "#fff"; });
     const scroller = panel.querySelector("#foir-scroll");
     if (scroller) scroller.scrollTop = scrollTop;
-    panel.querySelector("#foir-close").onclick = () => { if (!state.running) panel.style.display = "none"; };
+    panel.querySelector("#foir-close").onclick = () => { if (!state.running) state.uiWindow?.close(); };
     panel.querySelector("#foir-run").onclick = runReport;
     panel.querySelector("#foir-stop").onclick = () => { state.cancelRequested = true; state.controller?.abort(); state.message = "Durdurma istendi; tamamlanan sonuçlar korunacak."; updateStatus(); };
     panel.querySelector("#foir-yesterday").onclick = () => { state.startInput = yesterdayInput(); state.endInput = state.startInput; render(); };
@@ -1041,12 +1042,28 @@
     panel.querySelector("#foir-stop").disabled = !state.running;
   }
 
+  function uiDocument() {
+    try { return state?.uiWindow && !state.uiWindow.closed ? state.uiWindow.document : null; } catch (_) { return null; }
+  }
+
   function makePanel() {
-    document.getElementById(PANEL_ID)?.remove();
-    const panel = document.createElement("section");
+    let reportWindow = null;
+    try { reportWindow = window.open("", "fonetOrderIadeAnalizRaporu", "popup=yes,width=1500,height=920,resizable=yes,scrollbars=yes"); } catch (_) {}
+    if (!reportWindow) {
+      alert("Rapor penceresi açılamadı. Bu site için açılır pencerelere izin verip bookmark'ı yeniden çalıştırın.");
+      return;
+    }
+    state.uiWindow = reportWindow;
+    const doc = reportWindow.document;
+    doc.open();
+    doc.write(`<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>FONET Order İade Analiz Raporu</title></head><body style="margin:0;overflow:hidden;background:#fff;"></body></html>`);
+    doc.close();
+    doc.getElementById(PANEL_ID)?.remove();
+    const panel = doc.createElement("section");
     panel.id = PANEL_ID;
-    Object.assign(panel.style, { position: "fixed", right: "10px", bottom: "10px", width: "min(1460px,calc(100vw - 20px))", height: "88vh", zIndex: "2147483647", background: "#fff", color: "#0f172a", border: "1px solid #334155", borderRadius: "12px", boxShadow: "0 22px 65px rgba(0,0,0,.42)", overflow: "hidden", fontFamily: "Arial,sans-serif" });
-    document.body.appendChild(panel);
+    Object.assign(panel.style, { position: "fixed", inset: "0", width: "100vw", height: "100vh", background: "#fff", color: "#0f172a", overflow: "hidden", fontFamily: "Arial,sans-serif" });
+    doc.body.appendChild(panel);
+    reportWindow.focus();
     render();
   }
 
@@ -1066,6 +1083,7 @@
     sourcePageSize: 0,
     sourceCurrentPage: 1,
     sourceGridVisible: false,
+    uiWindow: null,
     sourceRowCount: 0,
     unreadablePatients: [],
     duplicatePatientRows: 0,
@@ -1091,8 +1109,8 @@
   window[APP_KEY] = {
     version: VERSION,
     state,
-    show() { const panel = document.getElementById(PANEL_ID); if (panel) panel.style.display = "block"; },
-    destroy() { state.controller?.abort(); document.getElementById(PANEL_ID)?.remove(); delete window[APP_KEY]; },
+    show() { if (!state.uiWindow || state.uiWindow.closed) makePanel(); else state.uiWindow.focus(); },
+    destroy() { state.controller?.abort(); try { state.uiWindow?.close(); } catch (_) {} delete window[APP_KEY]; },
     collectPatients,
     collectAllListedPatients,
     run: runReport,
